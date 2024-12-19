@@ -1,0 +1,395 @@
+---
+title: "Embryo Learning"
+author: 
+  - name: "Teun van den Brand"
+    email: "t.vd.brand@nki.nl"
+    affiliation: "Netherlands Cancer Institute"
+date: '`r format(Sys.time(), "%d/%m/%Y")`'
+output: 
+  html_document:
+    theme: united
+    highlight: pygments
+    fig_caption: yes
+    code_folding: hide
+    df_print: kable
+    toc: true
+    toc_depth: 4
+    toc_float:
+      collapsed: false
+bibliography: /DATA/users/t.vd.brand/bibliography/articles.bibtex
+knit: |
+  # Redirect output to HTML folder
+  (function(inputFile, encoding) {
+    outputFile <- gsub("Rmd$", "html", basename(inputFile))
+    rmarkdown::render(
+      input = inputFile,
+      encoding = encoding,
+      output_file = here::here("html", outputFile)
+    )
+  })
+---
+
+## Setup {.tabset}
+
+<!-- little HTML script to do indentation of the table of contents -->
+<script>
+    $(document).ready(function() {
+      $items = $('div#TOC li');
+      $items.each(function(idx) {
+        num_ul = $(this).parentsUntil('#TOC').length;
+        $(this).css({'text-indent': num_ul * 10, 'padding-left': 0});
+      });
+
+    });
+</script>
+
+```{css, echo = FALSE}
+div.sourceCode {
+  overflow-x: hidden;
+}
+```
+
+### Load packages
+
+```{r stfu, include = FALSE}
+# No, I do *not* want your start-up messages, thank you very much
+library <- function(...) {
+  suppressPackageStartupMessages(base::library(...))
+}
+```
+
+
+```{r load_packages}
+library(SingleCellExperiment)
+library(here)
+library(ggplot2)
+library(ggh4x)
+library(e1071)
+library(scales)
+library(ggbeeswarm)
+```
+
+### Load data
+
+```{r load_data}
+combined_file <- here("rds", "06_emb_gas_processed_exp.rds")
+combined <- readRDS(combined_file)
+
+gast_file  <- here("rds", "06_LSI_experiment.rds")
+cells_gast <- readRDS(gast_file)
+cells_gast <- cbind(
+  colData(cells_gast),
+  umap_x = reducedDim(cells_gast, "UMAP")[, 1],
+  umap_y = reducedDim(cells_gast, "UMAP")[, 2]
+)
+
+cells_embr <- readxl::read_excel(
+  "/DATA/users/t.vd.brand/projects/mouse_embryo/external_data/sciatac/metadata/41556_2020_489_MOESM3_ESM.xlsx"
+)
+
+```
+
+### Setup Aesthetics
+
+```{r setup_aes}
+mycolour <- "#000000FF" # Opaque Black
+
+theme_set(theme_gray())
+theme_update(text = element_text(colour = mycolour),
+             line = element_line(colour = mycolour),
+             aspect.ratio = 1,
+             axis.line  = element_line(colour = mycolour),
+             axis.ticks = element_line(colour = mycolour),
+             axis.text  = element_text(colour = mycolour),
+             legend.key = element_blank(),
+             legend.background = element_rect(colour = NA, fill = NA),
+             panel.background = element_blank(),
+             panel.grid.major = element_line(colour = "grey95"),
+             panel.grid.minor = element_blank(),
+             plot.background  = element_blank(),
+             strip.background = element_blank(),
+             strip.text = element_text(colour = mycolour))
+CYRUP <- c("#fed500", "#009bef", "#ff5c49", "#949494", "#D8D8D8")
+rm(mycolour)
+```
+
+## Aim
+
+## Building SVM
+
+### Data partitioning
+
+```{r}
+set.seed(0)
+
+embryo <- combined[, combined$study == "Embryo"]
+labels <- factor(embryo$clust_embryo)
+
+tenths <- round(ncol(embryo) / 10)
+pool <- seq_len(ncol(embryo))
+
+# Training set
+train <- sample(pool, tenths * 6)
+pool  <- setdiff(pool, train)
+
+# Validation set
+valid <- sample(pool, tenths * 2)
+pool  <- setdiff(pool, valid)
+
+# Test set
+test  <- pool
+
+use_dim <- 2:40
+use_red <- "LSI-cor"
+pca <- reducedDim(embryo, use_red)[, use_dim]
+
+train_set <- cbind.data.frame(
+  label = labels[train],
+  pca[train, ]
+)
+
+valid_set <- cbind.data.frame(
+  label = labels[valid],
+  pca[valid, ]
+)
+
+test_set <- cbind.data.frame(
+  label = labels[test],
+  pca[test, ]
+)
+```
+
+### Training
+
+```{r}
+gammas <- c(1e-5, 0.0001, 0.001, 0.01, 0.1, 1)
+
+tune_gamma <- lapply(gammas, function(g) {
+  svm(label ~ ., data = train_set, probability = TRUE,
+      gamma = g, cost = 1, scale = FALSE)
+})
+
+# svm_model <- svm(label ~ ., data = train_set, probability = TRUE,
+#                  gamma = 0.001, cost = 1, scale = FALSE)
+# train_pred <- predict(svm_model, newdata = train_set[, -1])
+# train_acc  <- mean(train_pred == train_set$label)
+```
+
+### Validation
+
+```{r}
+train_acc <- vapply(tune_gamma, function(model) {
+  pred <- predict(model, newdata = train_set[, -1])
+  mean(pred == train_set$label)
+}, numeric(1))
+
+valid_acc <- vapply(tune_gamma, function(model) {
+  pred <- predict(model, newdata = valid_set[, -1])
+  mean(pred == valid_set$label)
+}, numeric(1))
+
+df <- data.frame(
+  gamma    = c(gammas, gammas),
+  accuracy = c(train_acc, valid_acc),
+  set      = rep(c("training", "validation"), each = length(gammas))
+)
+
+ggplot(df, aes(gamma, accuracy, colour = set)) +
+  geom_pointpath() +
+  scale_colour_manual(
+    values = CYRUP[2:3]
+  ) +
+  scale_x_continuous(
+    trans  = "log10",
+    breaks = gammas,
+    labels = label_log()
+  ) +
+  scale_y_continuous(
+    breaks = breaks_width(0.2),
+    limits = c(0, 1)
+  )
+```
+
+### Testing
+
+```{r}
+model <- svm(
+  label ~ ., 
+  data  = rbind(test_set, valid_set),
+  gamma = gammas[which.max(valid_acc)],
+  cost  = 1,
+  scale = FALSE,
+  probability = TRUE
+)
+
+test_pred <- predict(model, newdata = test_set[, -1])
+test_acc  <- mean(test_pred == test_set$label)
+
+print(percent(test_acc, 0.1))
+```
+
+## Application
+
+```{r}
+gastruloid <- combined[, combined$study == "Gastruloid"]
+
+gast_pred <- predict(
+  model, 
+  newdata = reducedDim(gastruloid, use_red)[, use_dim],
+  probability = TRUE
+)
+
+probs <- attr(gast_pred, "probabilities")
+```
+
+### UMAP
+
+```{r}
+i <- match(gastruloid$alias, cells_gast$alias)
+
+prob_i <- match(as.character(gast_pred), colnames(probs))
+prob_i <- cbind(seq_len(nrow(probs)), prob_i)
+
+df <- data.frame(
+  x = cells_gast$umap_x[i],
+  y = cells_gast$umap_y[i],
+  clust = cells_gast$clusters$cluster[i],
+  pred = gast_pred,
+  prob = probs[prob_i],
+  sample = cells_gast$sample[i]
+)
+
+colours <- !duplicated(cells_embr$ann)
+colours <- setNames(cells_embr$colour[colours],
+                    cells_embr$ann[colours])
+colours <- c(colours, "Other" = "#999999")
+
+df$pred_display <- forcats::fct_lump_min(df$pred, 30)
+```
+
+#### Class
+
+```{r}
+ggplot(df, aes(x, y)) +
+  geom_point(
+    aes(colour = pred_display), 
+    size = 0.5
+  ) +
+  scale_colour_manual(
+    name   = "Predicted Tissue",
+    values = colours[levels(df$pred_display)],
+    guide = guide_legend(override.aes = list(size = 2))
+  ) +
+  scale_x_continuous(breaks = NULL, name = "UMAP 1") +
+  scale_y_continuous(breaks = NULL, name = "UMAP 2")
+```
+
+#### Probability
+
+```{r}
+ggplot(df, aes(x, y)) +
+  geom_point(
+    aes(colour = prob), 
+    size = 0.5
+  ) +
+  scale_colour_viridis_c() +
+  scale_x_continuous(breaks = NULL, name = "UMAP 1") +
+  scale_y_continuous(breaks = NULL, name = "UMAP 2")
+```
+
+### By cluster
+
+```{r}
+ggplot(df, aes(y = clust, fill = pred_display)) +
+  geom_bar(position = "fill") +
+  scale_fill_manual(
+    name   = "Predicted Tissue",
+    values = colours[levels(df$pred_display)]
+  )
+```
+
+```{r}
+ggplot(df, aes(clust, prob, colour = pred)) +
+  geom_quasirandom(size = 0.5) +
+  scale_colour_manual(
+    name   = "Predicted Tissue",
+    values = colours[levels(df$pred_display)],
+    guide = guide_legend(override.aes = list(size = 2))
+  )
+```
+
+
+
+### By sample
+
+```{r}
+ggplot(df, aes(x, y)) +
+  geom_point(
+    data = ~ transform(.x, sample = NULL),
+    size = 0.5, colour = "grey80"
+  ) +
+  geom_point(
+    aes(colour = pred_display), 
+    size = 0.5
+  ) +
+  scale_colour_manual(
+    name = "Predicted Tissue",
+    values = colours[levels(df$pred_display)],
+    guide = guide_legend(override.aes = list(size = 2))
+  ) +
+  scale_x_continuous(breaks = NULL, name = "UMAP 1") +
+  scale_y_continuous(breaks = NULL, name = "UMAP 2") +
+  facet_wrap(~ sample)
+```
+
+```{r}
+ggplot(df, aes(y = clust, fill = pred_display)) +
+  geom_bar(position = "fill") +
+  scale_fill_manual(
+    name   = "Predicted Tissue",
+    values = colours[levels(df$pred_display)]
+  )
+```
+
+```{r}
+ggplot(df[sample(nrow(df)),], aes(prob, sample, colour = pred)) +
+  geom_quasirandom(size = 0.5, groupOnX = FALSE) +
+  scale_colour_manual(
+    name   = "Predicted Tissue",
+    values = colours[levels(df$pred_display)],
+    guide = guide_legend(override.aes = list(size = 2))
+  )
+```
+
+## Save results
+
+```{r}
+exp <- readRDS(gast_file)
+
+i <- match(gastruloid$alias, exp$alias)
+
+new <- DataFrame(
+  tissue = rep("Not included", ncol(exp))
+)
+new$probability <- matrix(NA_real_, ncol(exp), ncol(probs))
+new$tissue[i] <- as.character(gast_pred)
+new$probability[i, ] <- probs
+colnames(new$probability) <- colnames(probs)
+attr(new$tissue, "colour") <- colours
+
+exp$embryo <- new
+
+saveRDS(exp, gast_file)
+```
+
+
+## References
+
+<div id="refs"></div>
+
+## Session Info
+
+```{r session_info, include=TRUE, echo=FALSE, results = "asis"}
+pkgs <- loadedNamespaces()
+libTvdB::format_sessioninfo_html(pkgs)
+```
