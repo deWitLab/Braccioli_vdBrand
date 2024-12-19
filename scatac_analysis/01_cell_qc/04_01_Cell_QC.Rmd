@@ -1,0 +1,666 @@
+---
+title: "Cell quality control"
+author: 
+  - name: "Teun van den Brand"
+    email: "t.vd.brand@nki.nl"
+    affiliation: "Netherlands Cancer Institute"
+date: '`r format(Sys.time(), "%d/%m/%Y")`'
+output: 
+  html_document:
+    theme: united
+    highlight: pygments
+    fig_caption: yes
+    code_folding: hide
+    df_print: kable
+    toc: true
+    toc_depth: 4
+    toc_float:
+      collapsed: false
+bibliography: /DATA/users/t.vd.brand/bibliography/articles.bibtex
+---
+
+## Setup {.tabset}
+
+<!-- little HTML script to do indentation of the table of contents -->
+<script>
+    $(document).ready(function() {
+      $items = $('div#TOC li');
+      $items.each(function(idx) {
+        num_ul = $(this).parentsUntil('#TOC').length;
+        $(this).css({'text-indent': num_ul * 10, 'padding-left': 0});
+      });
+
+    });
+</script>
+
+```{css, echo = FALSE}
+div.sourceCode {
+  overflow-x: hidden;
+}
+```
+
+### Load packages
+
+```{r load_packages, results = 'hide', warning = FALSE, message = FALSE}
+library(S4Vectors)
+library(GenomicRanges)
+library(Biostrings)
+library(data.table)
+library(ggplot2)
+library(scales)
+library(rtracklayer)
+library(ggforce)
+library(libTvdB)
+library(irlba)
+library(BiocNeighbors)
+library(TxDb.Mmusculus.UCSC.mm10.knownGene)
+library(GenomicFeatures)
+```
+
+### Load data
+
+```{r load_data}
+reads <- readRDS("../rds/04_GRanges_joined.rds")
+# cell_stats <- readRDS("../rds/cell_read_summary.rds")
+primers <- readRDS("../rds/primers_timecourse.rds")
+```
+
+### Setup Aesthetics
+
+```{r setup_aes}
+mycolour <- "#000000FF" # Opaque Black
+
+theme_set(theme_gray())
+theme_update(text = element_text(colour = mycolour),
+             line = element_line(colour = mycolour),
+             aspect.ratio = 1,
+             axis.line  = element_line(colour = mycolour),
+             axis.ticks = element_line(colour = mycolour),
+             axis.text  = element_text(colour = mycolour),
+             legend.key = element_blank(),
+             panel.background = element_blank(),
+             panel.grid.major = element_line(colour = "grey95"),
+             panel.grid.minor = element_blank(),
+             plot.background  = element_blank(),
+             strip.background = element_blank(),
+             strip.text = element_text(colour = mycolour))
+
+rm(mycolour)
+```
+
+## Aim
+
+Perform quality control on cells and pick which cells to keep for downstream analysis.
+
+## Calculate stats
+
+```{r}
+stats <- data.table(
+  mitocho = decode(seqnames(reads) == "chrM"),
+  barcode = decode(reads$barcode),
+  batch = decode(reads$batch),
+  occurance = reads$duplicates
+)
+stats <- stats[, list(unique = .N, occurance = sum(occurance)),
+               by = c("mitocho", "barcode", "batch")]
+stats[, duplicates := occurance - unique]
+
+mito <- stats[mitocho == TRUE, list(barcode, mito_unique = unique, mito_duplicates = duplicates, batch = batch)]
+nucl <- stats[mitocho == FALSE, list(barcode, unique, duplicates, batch = batch)]
+
+stats <- merge(nucl, mito, on = c("barcode", "batch"), all = TRUE)
+stats[] <- lapply(stats, function(x){x[is.na(x)] <- 0; x})
+stats[, total_reads := unique + duplicates + mito_unique + mito_duplicates]
+stats[, duplicated_reads := duplicates + mito_duplicates]
+stats[, mitochondrial_reads := mito_unique + mito_duplicates]
+```
+
+
+## Setup cell metadata
+
+```{r}
+cell_ids <- Rle(paste0(reads$barcode, "&", reads$batch))
+ids <- unique(cell_ids)
+ids <- tstrsplit(ids, "&")
+barcode <- as(ids[[1]], "DNAStringSet")
+
+meta <- DataFrame(
+  "barcode" = barcode,
+  "batch" = ids[[2]]
+)
+meta$barcode_parts <- DataFrame(
+  "i7" = Factor(subseq(barcode, 1, 8)),
+  "P7" = Factor(subseq(barcode, 9, 16)),
+  "i5" = Factor(subseq(barcode, 17, 23)),
+  "P5" = Factor(subseq(barcode, 24, 30))
+)
+# nbcodes <- NROW(meta)
+# batches <- unique(reads$batch)
+# meta <- rep(meta, length(batches))
+# meta$batch <- rep(batches, each = nbcodes)
+
+stats <- stats[J(as.character(meta$barcode), meta$batch), on = c("barcode", "batch")]
+stats <- as(stats, "DataFrame")[, -c(1, 2)]
+meta$QC_stats <- stats
+
+# Setup samples
+samples <- matrix(0, 8, 12)
+samples[1:3, 1:4] <- 1
+samples[4:6, 5:8] <- 1
+samples[7:8, 9:12] <- 1
+samples[1:3, 5:8] <- 2
+samples[4:6, 9:12] <- 2
+samples[7:8, 1:4] <- 2
+samples[1:3, 9:12] <- 3
+samples[4:6, 1:4] <- 3
+samples[7:8, 5:8] <- 3
+dimnames(samples) <- list(paste0("i5_0", 1:8), paste0("i7_", formatC(1:12, flag = "0", width = 2)))
+idx <- cbind(
+  match(as.character(meta$barcode_parts$i5), reverseComplement(subseq(primers$sequence, 1, 7))[primers$type == "i5"]),
+  match(as.character(meta$barcode_parts$i7), primers$sequence[primers$type == "i7"])
+)
+meta$sample <- samples[idx]
+meta$sample <- dplyr::case_when(
+  meta$batch == "pilot" ~ "120h (-M)",
+  meta$batch == "timecourse" & meta$sample == 1 ~ "72h",
+  meta$batch == "timecourse" & meta$sample == 2 ~ "96h",
+  meta$batch == "timecourse" & meta$sample == 3 ~ "120h (+M)",
+  meta$batch == "timecourse2" & meta$sample == 1 ~ "80h",
+  meta$batch == "timecourse2" & meta$sample == 2 ~ "88h",
+  meta$batch == "timecourse2" & meta$sample == 3 ~ "120h (-M)",
+  TRUE ~ "Invalid"
+)
+meta$sample <- factor(meta$sample, c("72h", "80h", "88h", "96h", "120h (-M)", "120h (+M)"),
+                      ordered = TRUE)
+```
+
+Sanity check: the found eligible reads should be deductable from the cell statistics:
+
+## Nucleosome banding scores
+
+In order to be a good cell that will be included in downstream analysis, it has to satisfy two criteria: (1) the data must be abundant and (2) the data must be of good quality.
+
+To distinguish a high quality cell from a poor quality cell, banding scores have been used in Cusanovich et al. (2018). It exploits that typical fragment length distributions from ATAC-seq have nucleosomal periodicity. To do so, a periodogram of fragment lengths needs to be made using Fourier transforms, after which the spectral densities of the 100bp-300bp signal can be summed up to yield a banding score.
+
+Code to calculate these banding scores was adapted from the [Shendure lab GitHub](https://github.com/shendurelab/mouse-atac/blob/master/banding_scores/calculate_nucleosome_banding_scores.R) page.
+
+To satisfy (1), we only include data with >2000 reads and to satisfy (2), we calculate a nucleosome banding score and require the cells to have a log10(score) above -0.8 (as was used in the mouse atlas paper).
+
+```{r, warning = FALSE}
+cells <- split(width(reads), cell_ids)
+
+band_score <- vapply(cells, function(cell) {
+  w <- table(factor(cell, levels = c(1:1000)))
+  
+  pgram <- spec.pgram(w / max(w), fast = T, plot = F, pad = 0.3, 
+                      tap = 0.5, span = 2, detrend = FALSE)
+  pgram$freq <- 1/pgram$freq
+  
+  score <- sum(pgram$spec[pgram$freq >= 100 & pgram$freq <= 300])
+  score
+}, numeric(1))
+
+meta$QC_stats$band_score <- band_score[paste0(as.character(meta$barcode), "&", meta$batch)]
+meta$QC_stats$inclusion <- log10(meta$QC_stats$band_score) > -2 & 
+  meta$QC_stats$unique > 2e3
+
+df <- as.data.frame(meta$QC_stats)
+df$sample <- meta$sample
+df$batch <- meta$batch
+
+ggplot(df, aes(unique, band_score)) +
+  geom_point(aes(colour = sample), alpha = 0.2) +
+  geom_hline(yintercept = 10^-2, linetype = 2) +
+  geom_vline(xintercept = 2000, linetype = 2) +
+  scale_x_continuous(trans = "log10",
+                     oob = squish_infinite,
+                     labels = math_format(format = log10),
+                     breaks = c(1e0, 1e1, 1e2, 1e3, 1e4, 1e5, 1e6),
+                     limits = c(1, NA),
+                     name = "Total Reads") +
+  scale_y_continuous(trans = "log10",
+                     oob = squish_infinite,
+                     labels = math_format(format = log10),
+                     breaks = c(1e0, 1e-1, 1e-2, 1e-3, 1e-4, 1e-5, 1e-6),
+                     name = "Nucleosome Banding Score") +
+  scale_colour_brewer(palette = "Set1",
+                      guide = guide_legend(override.aes = list(alpha = 1))) +
+  coord_cartesian(clip = "off") +
+  facet_wrap(~ batch) +
+  theme(legend.background = element_blank())
+```
+
+```{r}
+ggplot(df, aes(x = sample, y = band_score, group = interaction(inclusion, sample))) +
+  geom_boxplot(
+    aes(colour = sample, 
+        fill = stage(inclusion, 
+                     after_scale = ifelse(fill, colorspace::lighten(colour, 0.5), "white")))
+  ) +
+  scale_fill_manual(values = c(FALSE, TRUE),
+                    name = "Included", labels = c("No", "Yes")) +
+  scale_colour_manual(name = "Timepoint",
+                      values = brewer_pal(palette = "Set1")(6),
+                      labels = levels(df$sample),
+                      guide = guide_legend(override.aes = list(alpha = 1))) +
+  scale_y_continuous(trans = "log10",
+                     oob = squish_infinite,
+                     labels = math_format(format = log10),
+                     breaks = c(1e0, 1e-1, 1e-2, 1e-3, 1e-4, 1e-5, 1e-6),
+                     name = "Nucleosome Banding Score") +
+  facet_grid(~ batch, scales = "free_x", space = "free_x") +
+  scale_x_discrete(name = "") +
+  theme(aspect.ratio = NULL)
+```
+
+
+## TSS enrichment scores
+
+```{r}
+tss_width <- 100
+flank_width <- 2000
+
+tss <- resize(genes(TxDb.Mmusculus.UCSC.mm10.knownGene), 1)
+tss_target <- resize(tss, tss_width, fix = "center")
+tss_flank <- c(flank(tss_target, flank_width/2, start = TRUE),
+               flank(tss_target, flank_width/2, start = FALSE))
+tss_target <- as(tss_target, "GNCList")
+tss_flank <- as(tss_flank, "GNCList")
+
+tsses <- data.table(
+  tss = overlapsAny(reads, tss_target, ignore.strand = TRUE),
+  flank = overlapsAny(reads, tss_flank, ignore.strand = TRUE),
+  barcode = decode(cell_ids)
+)
+
+tsses <- tsses[, list(tss = sum(tss) / tss_width, flank = sum(flank) / flank_width), by = barcode]
+tsses[, tss_score := tss / flank]
+tsses <- tsses[J(paste0(as.character(meta$barcode), "&", meta$batch)), on = "barcode"]
+
+meta$QC_stats$tss_score <- tsses$tss_score
+
+df <- as.data.frame(meta$QC_stats)
+df$sample <- meta$sample
+df$batch <- meta$batch
+df$inclusion <- meta$QC_stats$inclusion <- df$total_reads > 2e3 & df$tss_score > 4 & meta$QC_stats$inclusion
+
+cols <- scales::brewer_pal(palette = "Set1")(6)
+
+ggplot(df, aes(total_reads, tss_score)) +
+  geom_point(aes(colour = interaction(sample, inclusion)), alpha = 0.2) +
+  geom_hline(yintercept = 4, linetype = 2) +
+  geom_vline(xintercept = 2000, linetype = 2) +
+  scale_x_continuous(trans = "log10",
+                     oob = squish_infinite,
+                     labels = math_format(format = log10),
+                     breaks = c(1e0, 1e1, 1e2, 1e3, 1e4, 1e5, 1e6),
+                     limits = c(1, NA),
+                     name = "Total Reads") +
+  scale_y_continuous(oob = squish_infinite,
+                     trans = "log10",
+                     name = "TSS Enrichment Score",
+                     limits = c(1, 100)) +
+  scale_colour_manual(name = "Cell",
+                      values = c(colorspace::lighten(cols, 0.5),
+                                 cols),
+                      labels = c(paste0(levels(df$sample), " (Excluded)"), levels(df$sample)),
+                      guide = guide_legend(override.aes = list(alpha = 1))) +
+  facet_wrap(~ batch) +
+  # annotate("text", x = c(2e4, 1e2), y = c(11, 11), 
+  #          label = c(paste0("n = ", nrow(meta[meta$QC_stats$inclusion, ])), 
+  #                    paste0("n = ", nrow(meta[!meta$QC_stats$inclusion, ])))) +
+  coord_cartesian(clip = "off") +
+  theme(legend.background = element_blank())
+```
+
+```{r}
+ggplot(df, aes(x = sample, y = tss_score, group = interaction(inclusion, sample))) +
+  geom_boxplot(
+    aes(colour = sample, 
+        fill = stage(inclusion, 
+                     after_scale = ifelse(fill, colorspace::lighten(colour, 0.5), "white")))
+  ) +
+  scale_fill_manual(values = c(FALSE, TRUE),
+                    name = "Included", labels = c("No", "Yes")) +
+  scale_colour_manual(name = "Timepoint",
+                      values = cols,
+                      labels = levels(df$sample),
+                      guide = guide_legend(override.aes = list(alpha = 1))) +
+  scale_y_continuous(trans = "log10", name = "TSS Enrichment Score") +
+  facet_grid(~ batch, scales = "free_x", space = "free_x") +
+  scale_x_discrete(name = "") +
+  theme(aspect.ratio = NULL)
+```
+
+## Duplicated reads
+
+```{r}
+df$frac_dup <- df$duplicated_reads / df$total_reads
+df$cell_status <- ifelse(df$inclusion, as.character(df$sample), "Excluded")
+df$cell_status <- factor(df$cell_status, levels = c(levels(meta$sample), "Excluded"))
+```
+
+
+### Versus total reads
+
+```{r, warning=FALSE}
+cols <- c(cols, "grey20")
+
+ggplot(df, aes(total_reads, frac_dup, colour = cell_status)) +
+  geom_point(alpha = 0.2) +
+  scale_colour_manual(name = "Cell",
+                      values = cols,
+                      guide = guide_legend(override.aes = list(alpha = 1))) +
+  scale_x_continuous(trans = "log10",
+                     name = "Total reads",
+                     labels = math_format(format = log10)) +
+  scale_y_continuous(name = "Duplicated reads",
+                     labels = percent,
+                     oob = squish_infinite) +
+  theme(aspect.ratio = 2 / (1 + sqrt(5))) +
+  facet_grid(batch ~ .)
+```
+
+### Density
+
+```{r}
+ggplot(df, aes(frac_dup, fill = cell_status)) +
+  geom_density(colour = NA, alpha = 0.5) +
+  scale_y_continuous(expand = c(0,0,0.1,0),
+                     name = "Density") +
+  scale_x_continuous(labels = percent,
+                     name = "Duplicated") +
+  scale_fill_manual(name = "Cell",
+                    values = cols,
+                    guide = guide_legend(override.aes = list(alpha = 1))) +
+  theme(aspect.ratio = 2 / (1 + sqrt(5))) +
+  facet_grid(batch ~ .)
+```
+
+## Mitochondrial reads
+
+```{r}
+df$frac_mit <- df$mitochondrial_reads / df$total_reads
+```
+
+### Versus total reads
+
+```{r, warning=FALSE}
+ggplot(df, aes(total_reads, frac_mit, colour = cell_status)) +
+  geom_point(alpha = 0.2) +
+  scale_colour_manual(name = "Cell",
+                      values = cols,
+                      guide = guide_legend(override.aes = list(alpha = 1))) +
+  scale_x_continuous(trans = "log10",
+                     name = "Total reads",
+                     labels = math_format(format = log10)) +
+  scale_y_continuous(name = "Mitochondrial reads",
+                     labels = percent_format(1),
+                     oob = squish_infinite) +
+  theme(aspect.ratio = 2 / (1 + sqrt(5))) +
+  facet_grid(batch ~ .)
+```
+
+### Density
+
+```{r}
+ggplot(df, aes(frac_mit, fill = cell_status)) +
+  geom_density(colour = NA, alpha = 0.5) +
+  scale_y_continuous(expand = c(0,0,0.1,0),
+                     name = "Density") +
+  scale_x_continuous(labels = percent_format(1),
+                     name = "Mitochondrial", limits = c(0, 0.2)) +
+  scale_fill_manual(name = "Cell",
+                    values = cols,
+                    guide = guide_legend(override.aes = list(alpha = 1))) +
+  theme(aspect.ratio = 2 / (1 + sqrt(5))) +
+  facet_grid(batch ~ .)
+```
+
+## Eligible reads
+
+```{r}
+df$frac_eli <- df$unique / df$total_reads
+```
+
+### Versus total reads
+
+```{r, warning=FALSE}
+ggplot(df, aes(total_reads, frac_eli, colour = cell_status)) +
+  geom_point(alpha = 0.2) +
+  scale_colour_manual(name = "Cell",
+                      values = cols,
+                      guide = guide_legend(override.aes = list(alpha = 1))) +
+  scale_x_continuous(trans = "log10",
+                     name = "Total reads",
+                     labels = math_format(format = log10)) +
+  scale_y_continuous(name = "Eligible reads",
+                     labels = percent_format(1),
+                     oob = squish_infinite) +
+  theme(aspect.ratio = 2 / (1 + sqrt(5))) +
+  facet_grid(batch ~ .)
+```
+
+### Density
+
+```{r}
+ggplot(df, aes(frac_eli, fill = cell_status)) +
+  geom_density(colour = NA, alpha = 0.5) +
+  scale_y_continuous(expand = c(0,0,0.1,0),
+                     name = "Density") +
+  scale_x_continuous(labels = percent_format(1),
+                     name = "Eligible") +
+  scale_fill_manual(name = "Cell",
+                    values = cols,
+                    guide = guide_legend(override.aes = list(alpha = 1))) +
+  theme(aspect.ratio = 2 / (1 + sqrt(5))) +
+  facet_grid(batch ~ .)
+```
+
+## Fragment length
+
+### Distribution
+
+```{r}
+fraglength <- width(reads)
+cell_inclusion <- setNames(paste0(df$cell_status, "&", df$batch), 
+                           paste0(meta$barcode, "&", meta$batch))
+
+fraglength <- split(fraglength, 
+                    as.factor(cell_inclusion[as.character(cell_ids)]))
+# fraglength <- fraglength[c("TRUE", "FALSE")]
+# fraglength <- setNames(fraglength, c("Included", "Excluded"))
+
+periodograms <- lapply(fraglength, function(frags) {
+  w <- table(factor(frags, levels = c(1:1000)))
+  pgram <- spec.pgram(w / max(w), fast = T, plot = F, pad = 0.3, 
+                      tap = 0.5, span = 2, detrend = FALSE)
+  pgram
+})
+
+fraglength <- lapply(names(fraglength), function(cat) {
+  dat <- table(fraglength[[cat]])
+  dat <- dat / sum(dat)
+  cbind(as.data.frame(dat), type = cat)
+})
+
+fraglength <- do.call(rbind, fraglength)
+fraglength$Var1 <- as.integer(fraglength$Var1)
+type <- tstrsplit(fraglength$type, "&")
+fraglength$type <- type[[1]]
+fraglength$batch <- type[[2]]
+
+g <- ggplot(fraglength, aes(Var1, Freq, fill = type)) +
+  geom_area(position = "identity", alpha = 0.7) +
+  scale_y_continuous(limits = c(0, 0.01),
+                     labels = percent_format(0.01),
+                     oob = squish,
+                     name = "Percent",
+                     expand = c(0,0,0.1,0)) +
+  scale_x_continuous(name = "Fragment Length") +
+  scale_fill_manual(values = cols,
+                    name = "Cell Category") +
+  theme(aspect.ratio = 2/(1 + sqrt(5)),
+        # legend.position = c(0.9, 0.9),
+        # legend.justification = c(1,1),
+        legend.background = element_blank()) +
+  facet_grid(batch ~ .)
+g
+```
+
+```{r}
+g + facet_grid(type ~ batch) + theme(legend.position = "right")
+```
+
+
+### Periodogram
+
+```{r}
+df <- data.frame(
+  x = unname(do.call(c, lapply(periodograms, `[[`, "freq"))),
+  y = unname(do.call(c, lapply(periodograms, `[[`, "spec"))),
+  # x = c(periodograms$Included$freq, periodograms$Excluded$freq),
+  # y = c(periodograms$Included$spec, periodograms$Excluded$spec),
+  z = rep(names(periodograms), lengths(lapply(periodograms, `[[`, "freq")))
+)
+type <- tstrsplit(df$z, "&")
+df$z <- type[[1]]
+df$batch <- type[[2]]
+
+ggplot(df, aes(1/x, y, colour = z)) +
+  geom_line() +
+  scale_y_continuous(trans = "log10",
+                     limits = c(NA, 100),
+                     name = "Spectrum",
+                     labels = math_format(format = log10)) +
+  scale_x_continuous(trans = "log10", name = "Period") +
+  scale_colour_manual(values = cols,
+                      name = "Cell Category") +
+  theme(aspect.ratio = 2/(1 + sqrt(5))) +
+  # annotate("text", x = c(10.5, 146), y = c(10^-0.5, 30), 
+  #          label = c("Helical turn", "Nucleosome")) +
+  # annotate("segment", x = c(10.5, 146), y = c(10^-1.05, 10), xend = c(10.5, 146),
+  #          yend = c(1e-2, 1), arrow = arrow(15, unit(4, "mm"), type = "closed")) +
+  facet_grid(batch ~ .)
+```
+
+## Calculate rough peaks
+
+```{r}
+# Check wether we've redefined cells
+old_cellspace <- "285aa8cd0801c75bb19688bab3348f07"
+cellspace <- digest::digest(meta$QC_stats$inclusion)
+# By comparing against hashed cell space from manual run
+cell_check <- isTRUE(cellspace == old_cellspace)
+
+if (file.exists("../rds/04_peaks_rough.rds") && cell_check) {
+  rough_peaks <- readRDS("../rds/04_peaks_rough.rds")
+  # Second check to see if peaks were generated by these cells
+  cell_check <- isTRUE(metadata(rough_peaks)$cell_ids == old_cellspace)
+} else {
+  cell_check <- FALSE # Basically when cells are okay but peaks don't exist
+}
+
+if (!cell_check) {
+  # I don't want to call peaks every time I knit this document, but I do want
+  # to call new peaks whenever I've changed the cell definition 
+  includeme <- cell_ids %in% paste0(meta$barcode, "&", meta$batch)[meta$QC_stats$inclusion]
+  
+  cleanreads <- reads[includeme]
+  cleanreads <- cleanreads[seqnames(cleanreads) %in% paste0("chr", c(1:19, "X"))]
+  
+  rough_peaks <- wrap_MACS2_callpeak(
+    cleanreads, genome_size = "mm", 
+    no_model = TRUE, keep_duplicates = "all",
+    ext_size = 200, shift = -100)
+  rough_peaks <- trim(rough_peaks)
+  
+  generator_script <- if (interactive()) "Interactive" else as.character(sys.call(1))[2]
+  system_info <- Sys.info()
+  session_info <- utils::sessionInfo()
+
+  metadata <- list(
+    intermediate_file = c(normalizePath("../rds/04_GRanges_joined.rds")),
+    generator = generator_script,
+    system = system_info,
+    session = session_info,
+    cell_ids = cellspace # The new one
+  )
+
+  metadata(rough_peaks) <- metadata
+  saveRDS(rough_peaks, "../rds/04_peaks_rough.rds")
+}
+```
+
+
+## Fraction of Reads in Peaks
+
+```{r}
+peaks <- rough_peaks
+frip <- data.table(
+  barcode = as.character(decode(reads$barcode)),
+  batch = decode(reads$batch),
+  overlap = overlapsAny(reads, peaks)
+)
+frip <- frip[, list(FRiP = mean(overlap)), by = c("barcode", "batch")]
+frip$id <- paste0(frip$barcode, "&", frip$batch)
+frip <- frip[J(paste0(as.character(meta$barcode), "&", meta$batch)), on = "id"]
+frip$type <- ifelse(meta$QC_stats$inclusion, as.character(meta$sample), "Excluded")
+# frip$type <- factor(frip$type, levels = c("80h", "88h", "120h", "Excluded"))
+
+meta$QC_stats$FRiP <- frip$FRiP
+
+ggplot(frip, aes(type, FRiP, colour = type)) +
+  geom_sina(alpha = 0.1) +
+  scale_y_continuous(name = "Fraction of Reads in Peaks") +
+  scale_x_discrete(name = "Inclusion") +
+  scale_colour_manual(values = cols,
+                    name = "Cell Category",
+                    guide = "none") +
+  theme(aspect.ratio = NULL,
+        panel.grid.major.x = element_blank()) +
+  facet_grid(~ batch, scales = "free_x", space = "free_x")
+```
+
+
+## Write files
+
+### Cell metadata
+
+```{r}
+generator_script <- as.character(sys.call(1))[2]
+system_info <- Sys.info()
+session_info <- utils::sessionInfo()
+
+metadata <- list(
+  intermediate_file = c(normalizePath("../rds/04_GRanges_joined.rds")),
+  generator = generator_script,
+  system = system_info,
+  session = session_info
+)
+
+metadata(meta) <- metadata
+saveRDS(meta, file = "../rds/04_cell_metadata.rds")
+```
+
+## References
+
+<div id="refs"></div>
+
+## Session Info
+
+<p>
+  <a class="btn btn-primary" data-toggle="collapse" href="#sinfo" role="button" aria-expanded="false" aria-controls="sinfo">
+    View
+  </a>
+</p>
+<div class="collapse" id="sinfo">
+  <div class="card card-body">
+
+```{r session_info, include=TRUE, echo=FALSE, results = "asis"}
+pkgs <- loadedNamespaces()
+libTvdB::format_sessioninfo_html(pkgs)
+```
+
+  </div>
+</div>

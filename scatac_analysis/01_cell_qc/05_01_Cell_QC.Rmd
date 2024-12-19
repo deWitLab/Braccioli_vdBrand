@@ -1,0 +1,523 @@
+---
+title: "Untitled"
+author: 
+  - name: "Teun van den Brand"
+    email: "t.vd.brand@nki.nl"
+    affiliation: "Netherlands Cancer Institute"
+date: '`r format(Sys.time(), "%d/%m/%Y")`'
+output: 
+  html_document:
+    theme: united
+    highlight: pygments
+    fig_caption: yes
+    code_folding: hide
+    df_print: kable
+    toc: true
+    toc_depth: 4
+    toc_float:
+      collapsed: false
+bibliography: /DATA/users/t.vd.brand/bibliography/articles.bibtex
+knit: |
+  # Redirect output to HTML folder
+  (function(inputFile, encoding) {
+    outputFile <- gsub("Rmd$", "html", basename(inputFile))
+    rmarkdown::render(
+      input = inputFile,
+      encoding = encoding,
+      output_file = here::here("html", outputFile)
+    )
+  })
+---
+
+## Setup {.tabset}
+
+<!-- little HTML script to do indentation of the table of contents -->
+<script>
+    $(document).ready(function() {
+      $items = $('div#TOC li');
+      $items.each(function(idx) {
+        num_ul = $(this).parentsUntil('#TOC').length;
+        $(this).css({'text-indent': num_ul * 10, 'padding-left': 0});
+      });
+
+    });
+</script>
+
+```{css, echo = FALSE}
+div.sourceCode {
+  overflow-x: hidden;
+}
+```
+
+### Load packages
+
+```{r stfu, include = FALSE}
+# No, I do *not* want your start-up messages, thank you very much
+library <- function(...) {
+  suppressPackageStartupMessages(base::library(...))
+}
+```
+
+
+```{r load_packages}
+library(S4Vectors)
+library(here)
+library(GenomicRanges)
+library(Biostrings)
+library(data.table)
+library(ggplot2)
+library(scales)
+library(rtracklayer)
+library(ggforce)
+library(libTvdB)
+library(TxDb.Mmusculus.UCSC.mm10.knownGene)
+library(GenomicFeatures)
+```
+
+### Load data
+
+```{r load_data}
+reads   <- readRDS(here("rds", "06_GRanges_KO.rds"))
+primers <- readRDS(here("rds", "primers_timecourse.rds"))
+```
+
+### Setup Aesthetics
+
+```{r setup_aes}
+mycolour <- "#000000FF" # Opaque Black
+
+theme_set(theme_gray())
+theme_update(text = element_text(colour = mycolour),
+             line = element_line(colour = mycolour),
+             aspect.ratio = 1,
+             axis.line  = element_line(colour = mycolour),
+             axis.ticks = element_line(colour = mycolour),
+             axis.text  = element_text(colour = mycolour),
+             legend.key = element_blank(),
+             legend.background = element_rect(colour = NA, fill = NA),
+             panel.background = element_blank(),
+             panel.grid.major = element_line(colour = "grey95"),
+             panel.grid.minor = element_blank(),
+             plot.background  = element_blank(),
+             strip.background = element_blank(),
+             strip.text = element_text(colour = mycolour))
+CYRUP <- c("#fed500", "#009bef", "#ff5c49", "#949494", "#D8D8D8")
+rm(mycolour)
+```
+
+### Functions
+
+```{r}
+egrid <- function(...) {
+  as.matrix(expand.grid(...))
+}
+```
+
+
+## Aim
+
+## Calculate stats
+
+```{r}
+stats <- data.table(
+  mitocho = decode(seqnames(reads) == "chrM"),
+  barcode = reads$barcode,
+  batch   = "KOs",
+  occurance = reads$duplicates
+)
+stats <- stats[, .(unique = .N, occurrance = sum(occurance)),
+               by = c("mitocho", "barcode", "batch")]
+stats[, duplicates := occurrance - unique]
+
+mito <- stats[mitocho == TRUE, 
+              .(barcode = barcode, batch = batch,
+                mito_unique = unique, mito_duplicates = duplicates)]
+nucl <- stats[mitocho == FALSE, .(barcode, unique, duplicates, batch)]
+
+stats <- merge(nucl, mito, on = c("barcode", "batch"), all = TRUE)
+stats[] <- lapply(stats, function(x){x[is.na(x)] <- 0; x})
+stats[, total_reads := unique + duplicates + mito_unique + mito_duplicates]
+stats[, duplicated_reads := duplicates + mito_duplicates]
+stats[, mitochondrial_reads := mito_unique + mito_duplicates]
+```
+
+## Setup cell metadata
+
+```{r}
+meta <- DataFrame(
+  barcode = unique(reads$barcode),
+  batch   = "KOs"
+)
+meta$barcode_parts <- DataFrame(
+  "i7" = substr(meta$barcode, 21, 27),
+  "P7" = substr(meta$barcode, 2, 9),
+  "i5" = substr(meta$barcode, 29, 40),
+  "P5" = substr(meta$barcode, 12, 18)
+)
+
+stats <- stats[J(as.character(meta$barcode), meta$batch), on = c("barcode", "batch")]
+stats <- as(stats, "DataFrame")[, -c(1, 2)]
+meta$QC_stats <- stats
+```
+
+
+```{r}
+theobarcode <- split(primers$sequence, primers$type)
+theobarcode <- list(
+  "P7" = as.character(theobarcode$P7),
+  "P5" = as.character(subseq(reverseComplement(DNAStringSet(theobarcode$P5)), 2, 8)),
+  "i7" = as.character(subseq(theobarcode$i7, 1, 7)),
+  "i5" = as.character(reverseComplement(subseq(DNAStringSet(theobarcode$i5), 1, 7)))
+)
+
+samples <- matrix("", 8, 12)
+dimnames(samples) <- list(
+  primers$alias[primers$type == "i5"],
+  primers$alias[primers$type == "i7"]
+)
+samples[egrid(1:3, 1:4)] <- "HM1 WT"
+samples[egrid(4:6, 5:8)] <- "HM1 WT"
+samples[egrid(7:8, 9:12)] <- "HM1 WT"
+samples[egrid(4:6, 1:4)] <- "MSGN1 KO"
+samples[egrid(7:8, 5:8)] <- "MSGN1 KO"
+samples[egrid(1:3, 9:12)] <- "MSGN1 KO"
+samples[egrid(7:8, 1:4)] <- "CDX KO"
+samples[egrid(1:3, 5:8)] <- "CDX KO"
+samples[egrid(4:6, 9:12)] <- "CDX KO"
+samples[cbind(c(1,2,3,4), c(1,2,3,5))] <- "E14 WT"
+
+i <- cbind(
+  match(meta$barcode_parts$i5, theobarcode$i5),
+  match(meta$barcode_parts$i7, theobarcode$i7)
+)
+
+meta$sample <- factor(samples[i], c("CDX KO", "MSGN1 KO", "HM1 WT", "E14 WT"))
+```
+
+## Calculate more QC
+
+### Nucleosome banding scores
+
+```{r}
+cells <- split(width(reads), reads$barcode)
+
+band_score <- vapply(cells, function(cell) {
+  w <- table(factor(cell, levels = c(1:1000)))
+  
+  pgram <- spec.pgram(w / max(w), fast = T, plot = F, pad = 0.3, 
+                      tap = 0.5, span = 2, detrend = FALSE)
+  pgram$freq <- 1/pgram$freq
+  
+  score <- sum(pgram$spec[pgram$freq >= 100 & pgram$freq <= 300])
+  score
+}, numeric(1))
+
+meta$QC_stats$band_score <- band_score[meta$barcode]
+meta$inclusion <- log10(meta$QC_stats$band_score) > -2 & meta$QC_stats$unique > 2e3
+
+df <- as.data.frame(meta$QC_stats)
+df$sample <- meta$sample
+df$batch <- meta$batch
+
+ggplot(df, aes(unique, band_score)) +
+  geom_point(aes(colour = sample), alpha = 0.5) +
+  geom_hline(yintercept = 10^-2, linetype = 2) +
+  geom_vline(xintercept = 2000, linetype = 2) +
+  scale_x_continuous(
+    trans = "log10", oob = squish_infinite,
+    labels = math_format(format = log10),
+    limits = c(1, NA),
+    name = "Unique Nuclear Reads"
+  ) +
+  scale_y_continuous(
+    trans = "log10", oob = squish_infinite,
+    labels = math_format(format = log10),
+    name = "Nucleosome Banding Score"
+  ) +
+  scale_colour_manual(
+    values = CYRUP
+  )
+```
+
+### TSS enrichment scores
+
+```{r}
+tss_width <- 100
+flank_width <- 2000
+
+tss <- resize(genes(TxDb.Mmusculus.UCSC.mm10.knownGene), 1)
+tss_target <- resize(tss, tss_width, fix = "center")
+tss_flank <- c(flank(tss_target, flank_width/2, start = TRUE),
+               flank(tss_target, flank_width/2, start = FALSE))
+tss_target <- as(tss_target, "GNCList")
+tss_flank <- as(tss_flank, "GNCList")
+
+tsses <- data.table(
+  tss = overlapsAny(reads, tss_target, ignore.strand = TRUE),
+  flank = overlapsAny(reads, tss_flank, ignore.strand = TRUE),
+  barcode = reads$barcode
+)
+
+tsses <- tsses[, list(tss = sum(tss) / tss_width, flank = sum(flank) / flank_width), by = barcode]
+tsses[, tss_score := tss / flank]
+tsses <- tsses[J(meta$barcode), on = "barcode"]
+
+meta$QC_stats$tss_score <- tsses$tss_score
+
+df <- as.data.frame(meta$QC_stats)
+df$sample <- meta$sample
+df$inclusion <- meta$QC_stats$inclusion <- df$total_reads > 2e3 & df$tss_score > 4 & meta$inclusion
+
+ggplot(df, aes(unique, tss_score)) +
+  geom_point(aes(colour = sample)) +
+  geom_hline(yintercept = 4, linetype = 2) +
+  geom_vline(xintercept = 2000, linetype = 2) +
+  scale_x_continuous(
+    trans = "log10", oob = squish_infinite,
+    labels = math_format(format = log10),
+    limits = c(1, NA),
+    name = "Unique Nuclear Reads"
+  ) +
+  scale_y_continuous(
+    trans = "log10", oob = squish_infinite,
+    name = "TSS Score"
+  ) +
+  scale_colour_manual(
+    values = CYRUP
+  )
+```
+
+## Plot QC stats
+
+### Duplicated reads
+
+```{r}
+df$frac_dup <- df$duplicated_reads / df$total_reads
+df$cell_status <- factor(
+  ifelse(df$inclusion, as.character(df$sample), "Excluded"),
+  c(levels(df$sample), "Excluded")
+)
+```
+
+#### Vs unique reads
+
+```{r}
+ggplot(df, aes(unique, frac_dup, colour = cell_status)) +
+  geom_point(alpha = 0.5) +
+  scale_colour_manual(
+    values = CYRUP
+  ) +
+  scale_x_continuous(
+    trans = "log10", name = "Unique Reads",
+    labels = math_format(format = log10)
+  ) +
+  scale_y_continuous(
+    name = "Duplicated reads",
+    labels = percent,
+    oob = squish_infinite
+  ) +
+  theme(aspect.ratio = 2 / (1 + sqrt(5)))
+```
+
+#### Density
+
+```{r}
+ggplot(df, aes(frac_dup, fill = cell_status)) +
+  geom_density(colour = NA, alpha = 0.5) +
+  scale_y_continuous(expand = c(0, 0, 0.1, 0),
+                     name = "Density") +
+  scale_x_continuous(labels = percent,
+                     name = "Duplicated") +
+  scale_fill_manual(values = CYRUP) +
+  theme(aspect.ratio = 2 / (1 + sqrt(5)))
+```
+
+### Mitochondrial reads
+
+```{r}
+df$frac_mit <- df$mitochondrial_reads / df$total_reads
+```
+
+#### Vs unique reads
+
+```{r}
+ggplot(df, aes(unique, frac_mit, colour = cell_status)) +
+  geom_point(alpha = 0.5) +
+  scale_colour_manual(
+    values = CYRUP
+  ) +
+  scale_x_continuous(
+    trans = "log10", name = "Unique Reads",
+    labels = math_format(format = log10)
+  ) +
+  scale_y_continuous(
+    name = "Mitochondrial reads",
+    labels = percent,
+    oob = squish_infinite
+  ) +
+  theme(aspect.ratio = 2 / (1 + sqrt(5)))
+```
+
+#### Density
+
+```{r}
+ggplot(df, aes(frac_mit, fill = cell_status)) +
+  geom_density(colour = NA, alpha = 0.5) +
+  scale_y_continuous(expand = c(0, 0, 0.1, 0),
+                     name = "Density") +
+  scale_x_continuous(labels = percent,
+                     name = "Mitochondrial", limits = c(0, 0.30)) +
+  scale_fill_manual(values = CYRUP) +
+  theme(aspect.ratio = 2 / (1 + sqrt(5)))
+```
+
+### Eligible reads
+
+```{r}
+df$frac_eli <- df$unique / df$total_reads
+```
+
+#### Vs unique reads
+
+```{r}
+ggplot(df, aes(unique, frac_eli, colour = cell_status)) +
+  geom_point(alpha = 0.5) +
+  scale_colour_manual(
+    values = CYRUP
+  ) +
+  scale_x_continuous(
+    trans = "log10", name = "Unique Reads",
+    labels = math_format(format = log10)
+  ) +
+  scale_y_continuous(
+    name = "Eligible reads",
+    labels = percent,
+    oob = squish_infinite
+  ) +
+  theme(aspect.ratio = 2 / (1 + sqrt(5)))
+```
+
+#### Density
+
+```{r}
+ggplot(df, aes(frac_eli, fill = cell_status)) +
+  geom_density(colour = NA, alpha = 0.5) +
+  scale_y_continuous(expand = c(0, 0, 0.1, 0),
+                     name = "Density") +
+  scale_x_continuous(labels = percent,
+                     name = "Eligible", limits = c(0, NA)) +
+  scale_fill_manual(values = CYRUP) +
+  theme(aspect.ratio = 2 / (1 + sqrt(5)))
+```
+
+### Fragment length
+
+```{r}
+fraglength <- width(reads)
+by_sample <- setNames(df$cell_status, meta$barcode)
+by_sample <- by_sample[reads$barcode]
+
+fraglength <- split(fraglength, by_sample)
+
+periodograms <- lapply(fraglength, function(frags) {
+  w <- table(factor(frags, levels = c(1:1000)))
+  pgram <- spec.pgram(w / max(w), fast = TRUE, plot = FALSE, pad = 0.3,
+                      tap = 0.5, span = 2, detrend = FALSE)
+  pgram
+})
+
+fraglength <- lapply(names(fraglength), function(cat) {
+  dat <- table(fraglength[[cat]])
+  dat <- dat / sum(dat)
+  cbind(as.data.frame(dat), type = cat)
+})
+fraglength <- do.call(rbind, fraglength)
+
+fraglength$Var1 <- as.integer(as.character(fraglength$Var1))
+fraglength$type <- factor(fraglength$type, levels(df$cell_status))
+
+ggplot(fraglength, aes(Var1, Freq, fill = type)) +
+  geom_area(position = "identity",
+            aes(colour = after_scale(fill))) +
+  facet_grid(type ~ .) +
+  theme(aspect.ratio = NULL) +
+  scale_x_continuous(
+    breaks = breaks_width(50)
+  ) +
+  scale_y_continuous(
+    name = "Frequency"
+  ) +
+  scale_fill_manual(values = CYRUP)
+```
+
+### Periodograms
+
+```{r}
+df <- data.frame(
+  x = unname(do.call(c, lapply(periodograms, `[[`, "freq"))),
+  y = unname(do.call(c, lapply(periodograms, `[[`, "spec"))),
+  z = rep(names(periodograms), lengths(lapply(periodograms, `[[`, "freq")))
+)
+df$type <- factor(df$z, names(periodograms))
+ggplot(df, aes(1/x, y, colour = z)) +
+  geom_line() +
+  scale_y_continuous(
+    trans = "log10",
+    limits = c(NA, 100),
+    name = "Spectrum",
+    labels = math_format(format = log10)
+  ) +
+  scale_x_continuous(trans = "log10", name = "Period") +
+  scale_colour_manual(
+    values = CYRUP,
+    limits = c("CDX KO", "MSGN1 KO", "HM1 WT", "E14 WT", "Excluded"),
+    name = "Cell Category"
+  )
+```
+
+### FRiP
+
+```{r}
+df <- as.data.frame(meta$QC_stats)
+df$sample <- meta$sample
+df$cell_status <- factor(
+    ifelse(df$inclusion, as.character(df$sample), "Excluded"),
+    c(levels(df$sample), "Excluded")
+)
+
+peaks <- readRDS(here("rds", "04_peaks_rough.rds"))
+
+frip <- data.table(
+  barcode = reads$barcode,
+  overlap = overlapsAny(reads, peaks)
+)
+frip <- frip[, .(FRiP = mean(overlap)), by = "barcode"]
+frip$celltype <- df$cell_status[match(frip$barcode, meta$barcode)]
+frip <- frip[J(meta$barcode), on = "barcode"]
+meta$QC_stats$FRiP <- frip$FRiP
+
+ggplot(frip, aes(celltype, FRiP, colour = celltype)) +
+  geom_sina() +
+  scale_colour_manual(
+    values = CYRUP
+  ) +
+  labs(x = "Cell category")
+```
+
+## Write files
+
+```{r}
+saveRDS(meta, here("rds", "05_cell_metadata_KOs.rds"))
+```
+
+
+## References
+
+<div id="refs"></div>
+
+## Session Info
+
+```{r session_info, include=TRUE, echo=FALSE, results = "asis"}
+pkgs <- loadedNamespaces()
+libTvdB::format_sessioninfo_html(pkgs)
+```
