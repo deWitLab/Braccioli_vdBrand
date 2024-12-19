@@ -1,0 +1,948 @@
+---
+title: "Figure 3"
+author: 
+  - name: "Teun van den Brand"
+    email: "t.vd.brand@nki.nl"
+    affiliation: "Netherlands Cancer Institute"
+date: '`r format(Sys.time(), "%d/%m/%Y")`'
+output: 
+  html_document:
+    theme: united
+    highlight: pygments
+    fig_caption: yes
+    code_folding: hide
+    df_print: kable
+    toc: true
+    toc_depth: 4
+    toc_float:
+      collapsed: false
+bibliography: /DATA/users/t.vd.brand/bibliography/articles.bibtex
+---
+
+## Setup {.tabset}
+
+<!-- little HTML script to do indentation of the table of contents -->
+<script>
+    $(document).ready(function() {
+      $items = $('div#TOC li');
+      $items.each(function(idx) {
+        num_ul = $(this).parentsUntil('#TOC').length;
+        $(this).css({'text-indent': num_ul * 10, 'padding-left': 0});
+      });
+
+    });
+</script>
+
+```{css, echo = FALSE}
+div.sourceCode {
+  overflow-x: hidden;
+}
+```
+
+### Load packages
+
+```{r load_packages, results = 'hide', warning = FALSE, message = FALSE}
+library(ggplot2)
+library(scales)
+library(SingleCellExperiment)
+library(here)
+library(data.table)
+library(colorspace)
+library(ggforce)
+library(ggrastr)
+library(Matrix)
+library(ggh4x)
+library(patchwork)
+library(gtable)
+library(grid)
+library(chromVAR)
+library(JASPAR2020)
+library(TFBSTools)
+source(here("rscripts", "project_functions_plotting.R"))
+CYRUP <- c("#fed500", "#009bef", "#ff5c49", "#949494", "#D8D8D8")
+```
+
+### Load data
+
+```{r load_data}
+experiment <- here("rds", "06_LSI_experiment.rds")
+exp <- readRDS(experiment)
+# brink <- readRDS(here("rds", "XX_vdbrink2020_sce_preprocessed.rds"))
+# vliet <- readRDS(here("rds", "XX_veenvliet2020_sce_preprocessed.rds"))
+```
+
+## Aim
+
+## Pseudotime UMAP
+
+```{r}
+exp <- exp[, exp$batch != "KOs"]
+
+df <- data.frame(
+  x = reducedDim(exp, "UMAP")[, 1],
+  y = reducedDim(exp, "UMAP")[, 2],
+  dpt = rank(exp$diffusion$dpt1) / ncol(exp),
+  clust = exp$clusters$cluster
+)
+
+centers <- as.data.table(df)
+centers <- centers[, list(x = median(x), y = median(y)), by = "clust"]
+
+edge_colour <- function(x, value = 0.3) {
+  colorspace::darken(x, value)
+}
+
+asp <- diff(range(df$x)) / diff(range(df$y))
+
+umap_coords <- list(
+  scale_x_continuous(breaks = NULL, name = "UMAP 1"),
+  scale_y_continuous(breaks = NULL, name = "UMAP 2"),
+  # coord_equal(),
+  theme(aspect.ratio = NULL)
+)
+
+pt <- ggplot(df, aes(x, y)) +
+  rasterise(
+    geom_outline_point(
+      aes(colour = dpt,
+          stroke_colour = after_scale(edge_colour(colour))),
+      size = 0.5
+    ),
+    dpi = 300, dev = "ragg"
+  ) +
+  scale_colour_continuous_sequential(
+    palette = "YlOrRd", limits = c(0, 1),
+    name = "Pseudotime Quantile",
+    breaks = seq(0, 1, by = 0.5), #rev = FALSE,
+    guide = guide_colourbar(
+      barheight = unit(2.5, "mm"),
+      barwidth = unit(36.25, "mm"), 
+      title.position = "top"
+    )
+  ) +
+  scale_x_continuous(name = "UMAP 1", breaks = NULL) +
+  scale_y_continuous(name = "UMAP 2", breaks = NULL) +
+  force_panelsizes(
+    cols = unit(36.25, "mm"),
+    rows = unit(36.25 / asp, "mm") 
+  ) +
+  theme(aspect.ratio = NULL,
+        legend.position = "bottom")
+pt
+```
+
+```{r}
+ggsave(
+  here("figures", "manuscript", "Fig3_UMAP_Pseudotime.svg"), plot = pt,
+  device = svglite::svglite, width = 86, height = 100, unit = "mm",
+  fix_text_size = FALSE
+)
+
+# ggsave(here("figures", "manuscript", "Fig3_UMAP_Pseudotime.pdf"),
+#        plot = pt, device = cairo_pdf(), width = 86, height = 100, unit = "mm")
+```
+
+## Motif UMAPs
+
+```{r}
+div_colours <- c("#0065b2", "#2399de", "#67cdfe", "#f5f5f5", "#fcb09d", "#ed6855", 
+"#be2a21")
+
+umap <- reducedDim(exp, "UMAP")
+
+motifs <- altExp(exp)
+meta <- rowData(motifs)
+
+moi <- c("Pou5f1::Sox2", "CDX2", "MSGN1")
+moi <- setNames(match(moi, meta$name), c("OCT4::SOX2", "CDX2", "MSGN1"))
+
+pwms <- getMatrixByID(JASPAR2020, meta$id[moi])
+pwms <- lapply(pwms, Matrix)
+names(pwms) <- names(moi)
+
+logos <- ggseqlogo::ggseqlogo(pwms, ncol = 3)
+logos <- layer_data(logos)
+logos$motif <- names(pwms)[as.numeric(as.character(logos$PANEL))]
+setDT(logos)
+logos[, x := x - diff(range(x)) * 0.5, by = "motif"]
+logos[, x := rescale(x, to = range(umap[, 1]))]
+logos$row <- factor("PWM", c("PWM", "UMAP 2"))
+```
+
+
+```{r}
+values <- assay(motifs)[moi, ]
+dimnames(values) <- list(names(moi), NULL)
+
+df <- reshape2::melt(values)
+colnames(df) <- c("motif", "cell", "value")
+df <- transform(
+  df,
+  x = umap[cell, 1],
+  y = umap[cell, 2],
+  row = factor("UMAP 2", c("UMAP 2", "PWM"))
+)
+
+t <- seq(0, 2 * pi, length.out = 360)
+r <- 2.5
+circ <- data.frame(
+  x = cos(t) * r + 3,
+  y = sin(t) * r - 1,
+  row = factor("UMAP 2", levels(df$row))
+)
+
+logos$motif <- factor(logos$motif, levels(df$motif))
+
+pt <- ggplot(df, aes(x, y)) +
+  ggrastr::rasterise(
+    geom_outline_point(
+      aes(colour = value,
+          stroke_colour = after_scale(edge_colour(colour))),
+      size = 0.75
+    ), dpi = 300, dev = "ragg",
+  ) +
+  geom_polygon(
+    data = circ,
+    fill = NA, colour = "black", linetype = "dotted"
+  ) +
+  geom_polygon(
+    data = logos,
+    aes(x, y, fill = I(fill), group = group)
+  ) +
+  scale_colour_gradientn(
+    colours = div_colours, limits = ~ c(-4, 4),
+    oob = oob_squish,
+    breaks = breaks_width(2),
+    name = "Motif Z-score",
+    guide = guide_colourbar(
+      barwidth  = unit(36.25 / asp, "mm"),
+      barheight = unit(2.5, "mm"),
+      title.position = "top"
+    )
+  ) +
+  facet_grid2(row ~ motif, space = "free_y", scales = "free_y",
+             switch = "y", axes = "x") +
+  force_panelsizes(
+    cols = unit(36.25, "mm"),
+    rows = unit(c(36.25 / asp, 7), "mm") 
+  ) +
+  scale_x_continuous(name = "UMAP 1", breaks = NULL) +
+  facetted_pos_scales(y = list(
+    row == "PWM" ~ scale_y_continuous(expand = c(0, 0), breaks = 0:2,
+                                      limits = c(0, 2), name = NULL),
+    row == "UMAP 2" ~ scale_y_continuous(name = NULL, breaks = NULL)
+  )) +
+  theme(
+    aspect.ratio = NULL,
+    strip.placement = "outside",
+    axis.ticks = element_blank(),
+    axis.ticks.length = unit(0, "pt"),
+    legend.position = "bottom",
+    legend.justification = c(1, 1),
+    panel.grid.major = element_blank(),
+    strip.text.x = element_text(hjust = 0, margin = margin())
+  )
+
+pt
+```
+
+```{r}
+ggsave(
+  here("figures", "manuscript", "Fig3_UMAP_Motifs.svg"), plot = pt,
+  device = svglite::svglite, width = 150, height = 100, unit = "mm",
+  fix_text_size = FALSE
+)
+```
+
+
+### Supplementary
+
+```{r}
+umap <- reducedDim(exp, "UMAP")
+
+motifs <- altExp(exp)
+meta <- rowData(motifs)
+
+moi <- c("SOX2", "POU5F1", "TBX6", "TCF3", 
+         "TWIST1", "GATA6", "TCF7", "ETV1",
+         "RFX4", "FOXD2", "Zic2", "TBXT")
+moi <- setNames(match(moi, meta$name), replace(moi, c(2, 11), c("OCT4", "ZIC2")))
+
+pwms <- getMatrixByID(JASPAR2020, meta$id[moi])
+pwms <- lapply(pwms, Matrix)
+names(pwms) <- names(moi)
+
+logos <- ggseqlogo::ggseqlogo(pwms, ncol = 3)
+logos <- layer_data(logos)
+logos$motif <- names(pwms)[as.numeric(as.character(logos$PANEL))]
+setDT(logos)
+logos[, x := x - diff(range(x)) * 0.5, by = "motif"]
+logos[, x := rescale(x, to = range(umap[, 1]))]
+logos$row <- factor("PWM", c("PWM", "UMAP 2"))
+```
+
+
+```{r}
+values <- assay(motifs)[moi, ]
+dimnames(values) <- list(names(moi), NULL)
+
+df <- reshape2::melt(values)
+colnames(df) <- c("motif", "cell", "value")
+df <- transform(
+  df,
+  x = umap[cell, 1],
+  y = umap[cell, 2],
+  row = factor("UMAP 2", c("UMAP 2", "PWM"))
+)
+
+t <- seq(0, 2 * pi, length.out = 360)
+r <- 2.5
+circ <- data.frame(
+  x = cos(t) * r + 3,
+  y = sin(t) * r - 1,
+  row = factor("UMAP 2", levels(df$row))
+)
+
+logos$motif <- factor(logos$motif, levels(df$motif))
+
+group1 <- c("SOX2", "RFX4", "TCF3", "TCF7")
+p1 <- ggplot(subset(df, motif %in% group1), aes(x, y)) +
+  ggrastr::rasterise(
+    geom_outline_point(
+      aes(colour = value,
+          stroke_colour = after_scale(edge_colour(colour))),
+      size = 0.75
+    ), dpi = 300, dev = "ragg",
+  ) +
+  geom_polygon(
+    data = subset(logos, motif %in% group1),
+    aes(x, y, fill = I(fill), group = group)
+  ) +
+  scale_colour_gradientn(
+    colours = div_colours, limits = ~ c(-4, 4),
+    oob = oob_squish,
+    breaks = breaks_width(2),
+    name = "Motif Z-score",
+    guide = "none"
+  ) +
+  facet_grid2(row ~ motif, space = "free_y", scales = "free_y",
+             switch = "y", axes = "x") +
+  force_panelsizes(
+    cols = unit(36.25, "mm"),
+    rows = unit(c(36.25 / asp, 7), "mm") 
+  ) +
+  scale_x_continuous(name = "UMAP 1", breaks = NULL) +
+  facetted_pos_scales(y = list(
+    row == "PWM" ~ scale_y_continuous(expand = c(0, 0), breaks = 0:2,
+                                      limits = c(0, 2), name = NULL),
+    row == "UMAP 2" ~ scale_y_continuous(name = NULL, breaks = NULL)
+  )) +
+  theme(
+    aspect.ratio = NULL,
+    strip.placement = "outside",
+    axis.ticks = element_blank(),
+    axis.ticks.length = unit(0, "pt"),
+    axis.title.x.bottom = element_blank(),
+    legend.position = "bottom",
+    legend.justification = c(1, 1),
+    panel.grid.major = element_blank(),
+    strip.text.x = element_text(hjust = 0, margin = margin())
+  )
+
+group2 <- c("OCT4", "TBX6", "TWIST1", "FOXD2")
+p2 <- ggplot(subset(df, motif %in% group2), aes(x, y)) +
+  ggrastr::rasterise(
+    geom_outline_point(
+      aes(colour = value,
+          stroke_colour = after_scale(edge_colour(colour))),
+      size = 0.75
+    ), dpi = 300, dev = "ragg",
+  ) +
+  geom_polygon(
+    data = subset(logos, motif %in% group2),
+    aes(x, y, fill = I(fill), group = group)
+  ) +
+  scale_colour_gradientn(
+    colours = div_colours, limits = ~ c(-4, 4),
+    oob = oob_squish,
+    breaks = breaks_width(2),
+    name = "Motif Z-score",
+    guide = "none"
+  ) +
+  facet_grid2(row ~ motif, space = "free_y", scales = "free_y",
+             switch = "y", axes = "x") +
+  force_panelsizes(
+    cols = unit(36.25, "mm"),
+    rows = unit(c(36.25 / asp, 7), "mm") 
+  ) +
+  scale_x_continuous(name = "UMAP 1", breaks = NULL) +
+  facetted_pos_scales(y = list(
+    row == "PWM" ~ scale_y_continuous(expand = c(0, 0), breaks = 0:2,
+                                      limits = c(0, 2), name = NULL),
+    row == "UMAP 2" ~ scale_y_continuous(name = NULL, breaks = NULL)
+  )) +
+  theme(
+    aspect.ratio = NULL,
+    strip.placement = "outside",
+    axis.ticks = element_blank(),
+    axis.title.x.bottom = element_blank(),
+    axis.ticks.length = unit(0, "pt"),
+    legend.position = "bottom",
+    legend.justification = c(1, 1),
+    panel.grid.major = element_blank(),
+    strip.text.x = element_text(hjust = 0, margin = margin())
+  )
+
+group3 <- setdiff(names(moi), c(group1, group2))
+p3 <- ggplot(subset(df, motif %in% group3), aes(x, y)) +
+  ggrastr::rasterise(
+    geom_outline_point(
+      aes(colour = value,
+          stroke_colour = after_scale(edge_colour(colour))),
+      size = 0.75
+    ), dpi = 300, dev = "ragg",
+  ) +
+  geom_polygon(
+    data = subset(logos, motif %in% group3),
+    aes(x, y, fill = I(fill), group = group)
+  ) +
+  scale_colour_gradientn(
+    colours = div_colours, limits = ~ c(-4, 4),
+    oob = oob_squish,
+    breaks = breaks_width(2),
+    name = "Motif Z-score",
+    guide = guide_colourbar(
+      barwidth  = unit(36.25 / asp, "mm"),
+      barheight = unit(2.5, "mm"),
+      title.position = "top"
+    )
+  ) +
+  facet_grid2(row ~ motif, space = "free_y", scales = "free_y",
+             switch = "y", axes = "x") +
+  force_panelsizes(
+    cols = unit(36.25, "mm"),
+    rows = unit(c(36.25 / asp, 7), "mm") 
+  ) +
+  scale_x_continuous(name = "UMAP 1", breaks = NULL) +
+  facetted_pos_scales(y = list(
+    row == "PWM" ~ scale_y_continuous(expand = c(0, 0), breaks = 0:2,
+                                      limits = c(0, 2), name = NULL),
+    row == "UMAP 2" ~ scale_y_continuous(name = NULL, breaks = NULL)
+  )) +
+  theme(
+    aspect.ratio = NULL,
+    strip.placement = "outside",
+    axis.ticks = element_blank(),
+    axis.ticks.length = unit(0, "pt"),
+    legend.position = "bottom",
+    legend.justification = c(1, 1),
+    panel.grid.major = element_blank(),
+    strip.text.x = element_text(hjust = 0, margin = margin())
+  )
+
+pt
+
+library(patchwork)
+
+
+```
+
+```{r}
+ggsave(
+  here("figures", "manuscript", "FigS3_Extra_UMAP_Motifs_1.svg"), plot = p1,
+  device = svglite::svglite, width = 170, height = 100, unit = "mm",
+  fix_text_size = FALSE
+)
+ggsave(
+  here("figures", "manuscript", "FigS3_Extra_UMAP_Motifs_2.svg"), plot = p2,
+  device = svglite::svglite, width = 170, height = 100, unit = "mm",
+  fix_text_size = FALSE
+)
+ggsave(
+  here("figures", "manuscript", "FigS3_Extra_UMAP_Motifs_3.svg"), plot = p3,
+  device = svglite::svglite, width = 170, height = 100, unit = "mm",
+  fix_text_size = FALSE
+)
+```
+
+
+
+## Trends
+
+```{r}
+clust_colour <- metadata(exp$clusters)$colours
+clust_colour <- setNames(clust_colour, LETTERS[1:8])
+
+diff <- exp[, exp$clusters$cluster %in% c("A", "B", "C")]
+ord  <- with(diff$diffusion, dpt1 / (dpt1 + dpt2))
+diff <- diff[, order(ord)]
+
+motifs <- altExp(diff, "motifs")
+zscore <- assay(motifs, "zscore")
+
+acf_score <- function(x) {
+  n <- length(x)
+  acf <- acf(x, n - 1, plot = FALSE)$acf
+  sum(abs(acf) > (1.96 / sqrt(n - 1))) / n
+}
+
+scores <- apply(zscore, 1, acf_score)
+zscore <- zscore[scores > 0.5, ]
+
+RhpcBLASctl::blas_set_num_threads(1)
+
+smooth <- apply(zscore, 1, function(x) {
+  loess.smooth(seq_along(x), x, evaluation = 100, span = 0.25)$y
+})
+
+highlight <- c("SOX2", "CDX2", "RFX4", "Pou5f1::Sox2", "TBXT")
+highlight <- setNames(match(highlight, rowData(motifs)$name),
+                      highlight)
+highlight <- setNames(rownames(motifs)[highlight], names(highlight))
+
+df <- reshape2::melt(smooth)
+df$label <- match(df$Var2, highlight)
+df$label <- ifelse(is.na(df$label), NA, names(highlight)[df$label])
+
+colours <- c(CYRUP[1:3], "#23AA17", "purple")
+names(colours)[1:5] <- names(highlight)
+
+last <- df[df$Var1 == max(df$Var1) & !is.na(df$label), ]
+ord <- match(as.character(last$Var2), highlight)
+last$label <- names(highlight)[ord]
+last$colours <- colours[last$label]
+last <- last[last$label != "Pou5f1::Sox2",]
+
+
+annotate <- data.frame(
+  x = scales::rescale(seq_len(ncol(diff)) / ncol(diff), c(1, 100)),
+  y = -Inf,
+  fill = diff$clusters$cluster
+)
+d <- median(diff(annotate$x))
+range <- c(-1, 1) * max(abs(df$value))
+
+trends <- ggplot(df, aes(Var1, value)) +
+  geom_line(aes(group = Var2),
+            data = ~ subset(.x, is.na(label)),
+            alpha = 0.3, size  = 0.1) +
+  geom_line(aes(group = Var2, colour = label),
+            data = ~ subset(.x, !is.na(label))) +
+  geom_rect(
+    aes(xmin = x -d, xmax = x + d, 
+        ymin = -Inf, ymax = min(range), fill = fill),
+    data = annotate, inherit.aes = FALSE, colour = NA
+  ) +
+  scale_y_continuous(
+    limits = function(x) {c(-1, 1) * max(abs(x))},
+    name = "Motif Z-score",
+    labels = function(x) {
+      ifelse(sign(x) == 1, paste0("+", x),
+             ifelse(sign(x) == -1, gsub("-", "\u2212", as.character(x)), x))
+    }
+  ) +
+  scale_x_continuous(
+    labels = number_format(scale = 1e-2, accuracy = 0.1),
+    name = "Pseudotime Quantile", expand = c(0,0),
+    breaks = c(1, 50.5, 100),
+    limits = c(1 -d, 100 + d)
+  ) +
+  scale_colour_manual(
+    values = colours, na.value = colours[5],
+    guide = "none"
+  ) +
+  scale_fill_manual(
+    # values = c(A = "#fed500", B = "#4DAF4A", C = "#A65628", D = "#984EA3", 
+    #            E = "#FF7F00", F = "#377EB8", G = "#F781BF", H = "#999999"),
+    values = clust_colour,
+    guide = "none"
+  ) +
+  guides(y.sec = guide_axis_manual(
+    breaks = last$value, labels = last$label,
+    label_colour = darken(last$colours, 0.2)
+  )) +
+  annotate(
+    geom = "text", x = 25, y = 2.5, label = "OCT4::SOX2",
+    colour = darken("#23AA17", 0.2), size = 6/.pt
+  ) +
+  theme(aspect.ratio = NULL,
+        axis.line.y.right = element_blank(),
+        axis.ticks.y.right = element_blank(),
+        axis.text.y.right = element_text(size = 6),
+        panel.grid.major = element_blank(),
+        plot.margin = unit(c(0,0,0,0), "pt"))
+trends
+```
+
+```{r}
+ggsave(
+  here("figures", "manuscript", "Fig3_Pseudotime_trends.svg"), plot = trends,
+  device = svglite::svglite, width = 86, height = 86, unit = "mm",
+  fix_text_size = FALSE
+)
+```
+
+## Heatmaps
+
+### NMP-NT axis
+
+```{r}
+diff <- exp[, exp$clusters$cluster %in% c("A", "B", "C")]
+ord  <- with(diff$diffusion, dpt1 / (dpt1 + dpt2))
+diff <- diff[, order(ord)]
+
+motifs <- altExp(diff, "motifs")
+zscore <- assay(motifs, "zscore")
+
+n_neuro_cells <- ncol(diff)
+
+
+zscore <- assay(motifs, "zscore")
+
+my_motifs <- c("RFX4", "SOX2", "Sox3",
+               "CDX2", "Pou5f1::Sox2", "TCF3", "SNAI1",
+               "KLF2", "LEF1", "TBXT", "TBX6", "MSGN1", "FOXC1", "TWIST1", "GATA6")
+my_motifs <- setNames(match(my_motifs, rowData(motifs)$name),
+                      my_motifs)
+my_motifs <- setNames(rownames(motifs)[my_motifs], names(my_motifs))
+
+df <- zscore[my_motifs,]
+rownames(df) <- names(my_motifs)
+colnames(df) <- NULL
+df <- reshape2::melt(df)
+
+time <- diff$sample
+# levels(time) <- gsub(" \\(.*", "", levels(time))
+levels(time) <- c(levels(time)[1:4], "120h", "120h (TLS)", levels(time)[7:length(levels(time))])
+
+
+# time_colour <- seq(0, 300, length.out = 5)
+# time_colour <- rev(farver::encode_colour(cbind(60, 70, time_colour), from = "lch"))
+time_colour <- viridisLite::turbo(6)
+
+facet_vars <- factor(c("Data", "Annotation"),
+                     c("Data", "Annotation"))
+
+anno <- data.frame(
+  Var2  = seq_along(diff$clusters$cluster),
+  fill  = diff$clusters$cluster,
+  time  = time,
+  facet = facet_vars[2]
+)
+
+levels(df$Var1)[levels(df$Var1) == "Pou5f1::Sox2"] <- "OCT4::SOX2"
+levels(df$Var1)[levels(df$Var1) == "Sox3"] <- "SOX3"
+
+df2 <- as.data.table(df)
+df2$bin <- (df2$Var2 - 1) %/% 10
+df2 <- df2[, .(Var2 = min(Var2) + 5, value = mean(value)),
+           by = c("Var1", "bin")]
+
+heatmap <- ggplot(cbind(df2, facet = facet_vars[1]), aes(Var2, Var1)) +
+  geom_raster(aes(fill = value)) +
+  GENOVA::scale_fill_GENOVA_div(
+    name = "Motif\nZ-score",
+    midpoint = 0, limits = c(-4, 4), oob = oob_squish,
+    # guide = guide_colorbar(barwidth = unit(5, "pt"))
+    guide = "none",
+  ) +
+  ggnewscale::new_scale_fill() +
+  geom_raster(
+    data = anno,
+    aes(fill = fill, y = "Cluster")
+  ) +
+  stat_funxy(
+    data = subset(anno, fill %in% LETTERS[1:3]),
+    aes(label = fill, group = fill, y = "Cluster"),
+    funx = median, geom = "text", funy = unique, size = 3
+  ) +
+  scale_fill_manual(
+    values = clust_colour,
+    guide = 'none'
+  ) +
+  ggnewscale::new_scale_fill() +
+  geom_raster(
+    data = anno,
+    aes(fill = time, y = "Sample Time")
+  ) +
+  scale_fill_manual(
+    values = time_colour,
+    guide = 'none'
+  ) +
+  scale_y_discrete(
+    expand = c(0, 0), name = NULL
+  ) +
+  scale_x_continuous(
+    expand = c(0, 0), limits = c(0, NA),
+    name = "Neural Tube Arm Pseudotime Rank"
+  ) +
+  facet_grid(facet ~ ., scales = "free_y", space = "free_y") +
+  force_panelsizes(rows = unit(c(nlevels(df$Var1), 2) * 8.4, "pt")) +
+  theme(aspect.ratio = NULL,
+        strip.text = element_blank(),
+        plot.margin = margin())
+heatmap
+```
+
+```{r}
+ggsave(
+  here("figures", "manuscript", "Fig3_Heatmap_Neuro_arm.svg"), plot = heatmap,
+  device = svglite::svglite, width = 86, height = 86, unit = "mm",
+  fix_text_size = FALSE
+)
+
+# ggsave(here("figures", "manuscript", "Fig3_Pseudotime_trends_heatmap.pdf"),
+#        plot = heatmap, device = cairo_pdf, width = 86, height = 86, unit = "mm")
+```
+
+### Mesoderm axis
+
+```{r}
+diff <- exp[, exp$clusters$cluster %in% c("A", "D", "E", "F")]
+ord  <- with(diff$diffusion, dpt1 / (dpt1 + dpt3))
+diff <- diff[, order(ord)]
+
+motifs <- altExp(diff, "motifs")
+zscore <- assay(motifs, "zscore")
+
+n_meso_cells <- ncol(diff)
+
+df <- zscore[my_motifs,]
+rownames(df) <- names(my_motifs)
+colnames(df) <- NULL
+df <- reshape2::melt(df)
+
+time <- diff$sample
+# levels(time) <- gsub(" \\(.*", "", levels(time))
+levels(time) <- c(levels(time)[1:4], "120h", "120h (TLS)", levels(time)[7:length(levels(time))])
+
+
+# time_colour <- seq(0, 300, length.out = 5)
+# time_colour <- rev(farver::encode_colour(cbind(60, 70, time_colour), from = "lch"))
+time_colour <- viridisLite::turbo(6)
+
+facet_vars <- factor(c("Data", "Annotation"),
+                     c("Data", "Annotation"))
+
+anno <- data.frame(
+  Var2  = seq_along(diff$clusters$cluster),
+  fill  = diff$clusters$cluster,
+  time  = time,
+  facet = facet_vars[2]
+)
+
+levels(df$Var1)[levels(df$Var1) == "Pou5f1::Sox2"] <- "OCT4::SOX2"
+levels(df$Var1)[levels(df$Var1) == "Sox3"] <- "SOX3"
+
+df2 <- as.data.table(df)
+df2$bin <- (df2$Var2 - 1) %/% 10
+df2 <- df2[, .(Var2 = min(Var2) + 5, value = mean(value)),
+           by = c("Var1", "bin")]
+
+heatmap2 <- ggplot(cbind(df2, facet = facet_vars[1]), aes(Var2, Var1)) +
+  geom_raster(aes(fill = value)) +
+  GENOVA::scale_fill_GENOVA_div(
+    name = "Motif\nZ-score",
+    midpoint = 0, limits = c(-4, 4), oob = oob_squish,
+    guide = "none"
+    # guide = guide_colorbar(
+    #   barwidth = unit(2.5, "mm"),
+    #   barheight = unit(nlevels(df$Var1) * 8.4, "pt")
+    # )
+  ) +
+  ggnewscale::new_scale_fill() +
+  geom_raster(
+    data = anno,
+    aes(fill = fill, y = "Cluster")
+  ) +
+  stat_funxy(
+    data = subset(anno, fill %in% LETTERS[1:3]),
+    aes(label = fill, group = fill, y = "Cluster"),
+    funx = median, geom = "text", funy = unique, size = 3
+  ) +
+  scale_fill_manual(
+    values = clust_colour,
+    guide = 'none'
+  ) +
+  ggnewscale::new_scale_fill() +
+  geom_raster(
+    data = anno,
+    aes(fill = time, y = "Sample Time")
+  ) +
+  scale_fill_manual(
+    values = time_colour,
+    guide = 'none'
+  ) +
+  scale_y_discrete(
+    # limits = c("Sample Time", "Cluster", names(my_motifs)),
+    expand = c(0, 0), name = NULL
+  ) +
+  scale_x_continuous(
+    expand = c(0, 0), limits = c(0, NA),
+    name = "Mesoderm Arm Pseudotime Rank"
+  ) +
+  facet_grid(facet ~ ., scales = "free_y", space = "free_y") +
+  force_panelsizes(rows = unit(c(nlevels(df$Var1), 2) * 8.4, "pt")) +
+  theme(aspect.ratio = NULL,
+        strip.text = element_blank(),
+        axis.text.y.left = element_blank(),
+        plot.margin = margin(l = 5.5),
+        legend.box.margin = margin(),
+        legend.margin = margin())
+heatmap2
+```
+
+
+```{r}
+# library(patchwork)
+# pw <- heatmap + heatmap2
+
+widths <- c(n_neuro_cells, n_meso_cells) / n_neuro_cells
+
+gt1 <- ggplotGrob(heatmap)
+gt2 <- ggplotGrob(heatmap2)
+
+gt <- cbind(gt1, gt2)
+gt$widths[c(5,15)] <- unit(widths, "null")
+
+svglite::svglite(
+  here("figures", "manuscript", "Fig3_Heatmap_Combined.svg"),
+  width = convertUnit(unit(170, "mm"), "in", valueOnly = TRUE),
+  height = 7, fix_text_size = FALSE
+)
+grid.newpage(); grid.draw(gt)
+dev.off()
+```
+
+```{r}
+legend <- ggplot(anno, aes(Var2, facet)) +
+  geom_raster(aes(fill = time)) +
+  scale_fill_manual(
+    name   = "Timepoint:",
+    values = time_colour,
+    labels = c("72h", "80h", "88h", "96h", "120h", "TLS"),
+    guide  = guide_legend(nrow = 1)
+  ) +
+  ggnewscale::new_scale_fill() +
+  geom_raster(aes(fill = fill)) +
+  scale_fill_manual(
+    name   = "Cluster:",
+    values = clust_colour,
+    limits = names(clust_colour),
+    guide = guide_legend(nrow = 1),
+    labels = c("Prog", "NMP", "NT", "SMD", "PxMD", "PhMD", "", "")
+  ) +
+  theme(
+    legend.position = "bottom",
+    legend.key.size = unit(6 * 1.2, "pt")
+  )
+
+ggsave(
+  here("figures", "manuscript", "Fig3_Heatmap_Legend.svg"), plot = legend,
+  device = svglite::svglite, width = 180, height = 86, unit = "mm",
+  fix_text_size = FALSE
+)
+```
+
+
+## CDX2 and RFX4
+
+```{r}
+motifs <- altExp(exp)
+zscore <- assay(motifs)
+
+tfs <- c("CDX2", "RFX4")
+i <- match(tfs, rowData(motifs)$name)
+
+dat <- as.data.frame(t(assay(motifs)[i,]))
+colnames(dat) <- tfs
+dat$cluster <- exp$clusters$cluster
+dat <- tidyr::pivot_longer(dat, 1:2)
+
+my_number <- function(x, accuracy = 0.01) {
+  sign <- sign(x)
+  x <- gsub("-", "\u2212", number(x, accuracy = accuracy))
+  ifelse(sign == 1, paste0("+", x), x)
+}
+
+limits <- c(-1, 1) * max(abs(quantile(dat$value, c(0.01, 0.999))))
+dat$fill <- with(dat, dplyr::case_when(
+  cluster == "B" & name == "CDX2" ~ clust_colour[2],
+  cluster == "C" & name == "RFX4" ~ clust_colour[3],
+  TRUE ~ "grey70"
+))
+
+motif_scores <- ggplot(
+  subset(dat, cluster != "H"), 
+  aes(value, cluster, fill = I(fill))
+  ) +
+  geom_vline(xintercept = 0, linetype = 2) +
+  ggridges::geom_density_ridges(
+    aes(colour = after_scale(darken(fill, 0.4))),
+    panel_scaling = FALSE, bandwidth = 0.3,
+    alpha = 0.8
+  ) +
+  scale_y_discrete(
+    name = "Density by cluster",
+    limits = rev, expand = c(0,0)
+  ) +
+  stat_summary(
+    geom = "text",
+    aes(label = after_stat(my_number(x)),
+        x = stage(value, after_stat = 5)),
+    hjust = 1, vjust = -0.6, fun = median,
+    size = 8 / .pt
+  ) +
+  scale_x_continuous(
+    name = "Motif Activity Z-score",
+    oob = scales::oob_squish,
+    expand = c(0, 0),
+    breaks = c(-3, 0, 3, 6),
+    labels = c("\u22123", 0, "+3", "+6"),
+    limits = c(-4, 6)
+  ) +
+  facet_grid(~ name) +
+  coord_cartesian(clip = "off") +
+  theme(
+    aspect.ratio = NULL,
+    strip.text.x = element_text(hjust = 0),
+    axis.line.y = element_blank(),
+    panel.grid.major.y = element_blank(),
+    axis.title.y = element_blank()
+  )
+motif_scores
+```
+
+```{r}
+ggsave(
+  here("figures", "manuscript", "Fig3_Motif_Scores.svg"), plot = motif_scores,
+  device = svglite::svglite, width = 86, height = 100, unit = "mm",
+  fix_text_size = FALSE
+)
+```
+
+
+
+
+
+## References
+
+<div id="refs"></div>
+
+## Session Info
+
+<p>
+  <a class="btn btn-primary" data-toggle="collapse" href="#sinfo" role="button" aria-expanded="false" aria-controls="sinfo">
+    View
+  </a>
+</p>
+<div class="collapse" id="sinfo">
+  <div class="card card-body">
+
+```{r session_info, include=TRUE, echo=FALSE, results = "asis"}
+pkgs <- loadedNamespaces()
+libTvdB::format_sessioninfo_html(pkgs)
+```
+
+  </div>
+</div>

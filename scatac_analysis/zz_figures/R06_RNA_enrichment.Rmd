@@ -1,0 +1,256 @@
+---
+title: "Rebuttal: marker overlaps RNA/ATAC"
+author: 
+  - name: "Teun van den Brand"
+    email: "t.vd.brand@nki.nl"
+    affiliation: "Netherlands Cancer Institute"
+date: '`r format(Sys.time(), "%d/%m/%Y")`'
+output: 
+  html_document:
+    theme: united
+    highlight: pygments
+    fig_caption: yes
+    code_folding: hide
+    df_print: kable
+    toc: true
+    toc_depth: 4
+    toc_float:
+      collapsed: false
+bibliography: /DATA/users/t.vd.brand/bibliography/articles.bibtex
+knit: |
+  # Redirect output to HTML folder
+  (function(inputFile, encoding) {
+    outputFile <- gsub("Rmd$", "html", basename(inputFile))
+    rmarkdown::render(
+      input = inputFile,
+      encoding = encoding,
+      output_file = here::here("html", outputFile)
+    )
+  })
+---
+
+## Setup {.tabset}
+
+<!-- little HTML script to do indentation of the table of contents -->
+<script>
+    $(document).ready(function() {
+      $items = $('div#TOC li');
+      $items.each(function(idx) {
+        num_ul = $(this).parentsUntil('#TOC').length;
+        $(this).css({'text-indent': num_ul * 10, 'padding-left': 0});
+      });
+
+    });
+</script>
+
+```{css, echo = FALSE}
+div.sourceCode {
+  overflow-x: hidden;
+}
+```
+
+### Load packages
+
+```{r stfu, include = FALSE}
+# No, I do *not* want your start-up messages, thank you very much
+library <- function(...) {
+  suppressPackageStartupMessages(base::library(...))
+}
+```
+
+
+```{r load_packages}
+library(ggplot2)
+library(SingleCellExperiment)
+library(Matrix)
+library(here)
+library(scran)
+library(GenomicFeatures)
+library(EnsDb.Mmusculus.v79)
+```
+
+### Load data
+
+```{r load_data}
+source(here("rscripts", "project_functions_plotting.R"))
+vvliet <- readRDS(here::here("rds", "XX_veenvliet2020_sce_preprocessed.rds"))
+stats <- readRDS(here::here("rds", "06_peak_statistics.rds"))
+```
+
+### Setup Aesthetics
+
+```{r setup_aes}
+CYRUP <- c("#fed500", "#009bef", "#ff5c49", "#949494", "#D8D8D8")
+div_colours <- c("#0065b2", "#2399de", "#67cdfe", "#f5f5f5", "#fcb09d", 
+                 "#ed6855", "#be2a21")
+```
+
+## Aim
+
+### Annotate genes with TSSs
+
+```{r}
+rownames(vvliet) <- rowData(vvliet)$ensembl_id
+
+all_genes <- genes(EnsDb.Mmusculus.v79)
+all_genes <- keepStandardChromosomes(all_genes, pruning.mode = "coarse")
+vvliet <- vvliet[rownames(vvliet) %in% all_genes$gene_id, ]
+
+tss <- all_genes[match(rownames(vvliet), all_genes$gene_id)]
+tss <- resize(tss, 1, fix = "start")
+old <- seqlevels(seqinfo(tss))
+idx <- match(old, genomeStyles("Mus musculus")[, "Ensembl"])
+new <- genomeStyles("Mus musculus")[idx, "UCSC"]
+seqlevels(tss) <- new
+
+fov <- trim(resize(tss, 50e3, fix = "center"))
+genome(fov) <- "mm10"
+
+base_rate <- mean(overlapsAny(stats$ranges, fov))
+
+
+rowData(vvliet) <- fov
+```
+
+### Pick markers
+
+```{r}
+ntop <- 100
+colLabels(vvliet) <- vvliet$cluster
+markers <- findMarkers(vvliet, row.data = rowData(vvliet), pval.type = "all")
+```
+
+### Define peak sets
+
+```{r}
+uclust <- LETTERS[1:8]
+pval_cols <- paste0("cluster_", uclust, "_pvalue")
+efft_cols <- paste0("cluster_", uclust, "_estimate")
+
+peak_sets <- mapply(function(pvalue, effect) {
+  p.adjust(pvalue, "fdr") < 0.05 & effect > log(1.5)
+}, pvalue = stats[pval_cols], effect = stats[efft_cols])
+colnames(peak_sets) <- gsub("_pvalue", "", colnames(peak_sets))
+colnames(peak_sets) <- gsub("cluster_", "", colnames(peak_sets))
+```
+
+### Calculate Enrichment
+
+```{r}
+npeaks <- colSums(peak_sets)
+enrich <- vapply(markers, function(genes) {
+  gr <- head(genes$X[genes$summary.logFC > 0], ntop)
+  
+  olap <- overlapsAny(stats$ranges, gr)
+  # Fraction of peaks in set that overlaps the domains of top genes
+  observed <- (colSums(peak_sets[olap,])) / npeaks
+  # Fraction of total peaks that overlaps the domains of top genes
+  expected <- (sum(olap)) / nrow(peak_sets)
+  observed / expected
+}, numeric(ncol(peak_sets)))
+```
+
+### Plot
+
+```{r}
+df <- reshape2::melt(enrich)
+
+p <- ggplot(df, aes(Var1, Var2, fill = log2(value))) +
+  geom_raster() +
+  scale_y_discrete(
+    limits = c("Unknown", "PCGLC", "Endoderm", "Endothelial", "SomiteDermo",
+               "SomiteSclero", "Somite", "Somite0", "Somite-1", "aPSM", "pPSM",
+               "NMPs", "NeuralTube1", "NeuralTube2"),
+    labels = c("Unknown", "PGCLC", "Endoderm", "Endothelial", "Somite (Dermo)",
+               "Somite (Sclero)", "Somite", "Somite (0)", "Somite (-1)", "aPSM", "pPSM",
+               "NMPs", "NeuralTube1", "NeuralTube2"),
+    name = "scRNAseq cell type\n(Veenvliet et al.)"
+  ) +
+  scale_x_discrete(
+    limits = LETTERS[1:7],
+    labels = c("Early nNMP", "Late nNMP", "SC", "PSM", "PxMD", "PhMD", "Enth"),
+    guide = guide_axis(angle = 45),
+    name = "scATACseq cell type"
+  ) +
+  scale_fill_gradientn(
+    colours = div_colours,
+    name = "Log\u2082 Fold Change",
+    limits = c(-3.5, 3.5),
+    guide = guide_colourbar(
+      title.position = "top",
+      barwidth = unit(7 * 0.8, "lines"),
+      barheight = unit(5.5, "pt")
+    )
+    # limits = function(x) max(abs(x)) * c(-1, 1)
+  ) +
+  coord_equal(expand = FALSE) +
+  theme(aspect.ratio = NULL, legend.position = "top", legend.margin = margin()) +
+  ggh4x::force_panelsizes(
+    rows = unit(14 * 0.8, "lines"),
+    cols = unit(7 * 0.8, "lines")
+  )
+
+ggsave(
+  here("figures", "manuscript", "Rev_RNA_ATAC_enrichment.svg"),
+  plot = p,
+  device = svglite::svglite, width = 100, height = 100, units = "mm",
+  fix_text_size = FALSE
+)
+
+
+```
+
+## PhMD candidates
+
+```{r}
+options(max.print = 50)
+```
+
+
+### Versus all
+
+```{r}
+candi <- markers$SomiteSclero
+keep <- overlapsAny(candi$X, stats$ranges[peak_sets[, "F"]])
+candi <- candi[keep, ]
+candi <- candi[candi$FDR < 0.05 & candi$summary.logFC > 0,]
+
+df1 <- data.frame(
+  gr = as.character(candi$X),
+  name = candi$gene_name,
+  fdr = candi$FDR,
+  lfc = candi$summary.logFC
+)
+knitr::kable(df1)
+```
+
+### Versus dermo
+
+```{r}
+candi <- markers$SomiteSclero
+keep <- overlapsAny(candi$X, stats$ranges[peak_sets[, "F"]])
+candi <- candi[keep, ]
+candi <- candi[candi$FDR < 0.05 & candi$logFC.SomiteDermo > 0,]
+candi <- candi[order(-candi$logFC.SomiteDermo),]
+
+df2 <- data.frame(
+  gr = as.character(candi$X),
+  name = candi$gene_name,
+  fdr = candi$FDR,
+  lfc = candi$summary.logFC
+)
+knitr::kable(df2)
+```
+
+
+
+## References
+
+<div id="refs"></div>
+
+## Session Info
+
+```{r session_info, include=TRUE, echo=FALSE, results = "asis"}
+pkgs <- loadedNamespaces()
+libTvdB::format_sessioninfo_html(pkgs)
+```

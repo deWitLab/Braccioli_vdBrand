@@ -1,0 +1,684 @@
+---
+title: "Figure S1"
+author: 
+  - name: "Teun van den Brand"
+    email: "t.vd.brand@nki.nl"
+    affiliation: "Netherlands Cancer Institute"
+date: '`r format(Sys.time(), "%d/%m/%Y")`'
+output: 
+  html_document:
+    theme: united
+    highlight: pygments
+    fig_caption: yes
+    code_folding: hide
+    df_print: kable
+    toc: true
+    toc_depth: 4
+    toc_float:
+      collapsed: false
+bibliography: /DATA/users/t.vd.brand/bibliography/articles.bibtex
+knit: |
+  # Redirect output to HTML folder
+  (function(inputFile, encoding) {
+    outputFile <- gsub("Rmd$", "html", basename(inputFile))
+    rmarkdown::render(
+      input = inputFile,
+      encoding = encoding,
+      output_file = here::here("html", outputFile)
+    )
+  })
+---
+
+## Setup {.tabset}
+
+<!-- little HTML script to do indentation of the table of contents -->
+<script>
+    $(document).ready(function() {
+      $items = $('div#TOC li');
+      $items.each(function(idx) {
+        num_ul = $(this).parentsUntil('#TOC').length;
+        $(this).css({'text-indent': num_ul * 10, 'padding-left': 0});
+      });
+
+    });
+</script>
+
+```{css, echo = FALSE}
+div.sourceCode {
+  overflow-x: hidden;
+}
+```
+
+### Load packages
+
+```{r stfu, include = FALSE}
+# No, I do *not* want your start-up messages, thank you very much
+library <- function(...) {
+  suppressPackageStartupMessages(base::library(...))
+}
+```
+
+
+```{r load_packages}
+library(ggh4x)
+
+library(ggplot2)
+library(scales)
+library(SingleCellExperiment)
+library(here)
+library(ggrastr)
+library(ggdist)
+library(colorspace)
+library(grid)
+library(data.table)
+source(here("rscripts", "project_functions_plotting.R"))
+```
+
+### Load data
+
+```{r load_data}
+exp <- readRDS(here("rds", "06_LSI_experiment.rds"))
+meta <- colData(exp)
+
+raw_meta1 <- readRDS(here("rds", "04_cell_metadata.rds"))
+raw_meta2 <- readRDS(here("rds", "05_cell_metadata_KOs.rds"))
+```
+
+## Batch information
+
+```{r}
+df <- data.frame(
+  sample = meta$sample,
+  batch  = meta$batch,
+  clust  = meta$clusters$cluster
+)
+levels(df$sample) <- gsub(" ", "\n", levels(df$sample))
+df$batch <- factor(df$batch, c("pilot", "timecourse", "timecourse2", "KOs"))
+
+clust_nms <- setNames(
+  c("Prog", "NMP", "SC", "SMD", "PxMD", "PhMD", "Enth", "Endo"),
+  sort(unique(df$clust))
+)
+
+df <- as.data.table(df)
+df <- df[, .(n = .N), by = c("sample", "batch", "clust")]
+
+p <- ggplot(df, aes(sample, clust)) +
+  geom_text(
+    aes(label = number(n, accuracy = 1, big.mark = ",")),
+    hjust = 1, nudge_x = 0.4
+  ) +
+  scale_y_discrete(
+    limits = rev(names(clust_nms)),
+    labels = rev(clust_nms),
+    name = "Cluster"
+  ) +
+  scale_x_discrete(guide = "none", name = NULL) +
+  facet_nested(
+    ~ batch + sample,
+    scales = "free_x",
+    nest_line = element_line(),
+    strip = strip_nested(size = "variable")
+  ) +
+  theme(
+    aspect.ratio = NULL,
+    strip.text.x.top = element_text(vjust = 1),
+    panel.grid.major = element_blank()
+  ) +
+  force_panelsizes(
+    cols = unit(0.9, "cm"),
+    rows = unit(8, "lines")
+  )
+p
+```
+
+```{r}
+ggsave(
+  here("figures", "manuscript", "FigS1_sample_cluster_table.svg"), plot = p,
+  device = svglite::svglite, width = 150, height = 150, unit = "mm",
+  fix_text_size = FALSE
+)
+```
+
+## E14 / HM1 similarity
+
+```{r}
+a <- assay(exp)[, exp$sample == "120h (+M)" & exp$batch == "timecourse"]
+b <- assay(exp)[, exp$sample == "72h"]
+
+a <- a[, sample(ncol(a), sum(exp$sample == "E14 WT"))]
+b <- b[, sample(ncol(b), sum(exp$sample == "HM1 WT"))]
+
+```
+
+
+```{r}
+e14 <- assay(exp)[, exp$sample == "E14 WT"]
+hm1 <- assay(exp)[, exp$sample == "HM1 WT"]
+
+df <- data.frame(
+  e14 = rowMeans(e14),
+  hm1 = rowMeans(hm1)
+)
+print(with(df, cor(e14, hm1)))
+```
+
+
+```{r}
+p <- ggplot(df, aes(e14, hm1)) +
+  ggrastr::rasterise(
+    ggpointdensity::geom_pointdensity(size = 0.1, shape = "."),
+    dpi = 300, dev = "ragg_png"
+  ) +
+  scale_colour_viridis_c(
+    name = "Neighbours",
+    guide = guide_colourbar(barheight = unit(3.407253, "cm"), barwidth = unit(2.5, "mm")),
+    labels = label_number(scale = 1e-3, suffix = "k"),
+    limits = c(0, NA)
+  ) +
+  scale_x_continuous(
+    breaks = breaks_width(0.2),
+    name = "E14 WT 120h\nFraction accessible"
+  ) +
+  scale_y_continuous(
+    breaks = breaks_width(0.2),
+    name = "HM1 WT 120h\nFraction accessible"
+  ) +
+  force_panelsizes(
+    rows = unit(3.407253, "cm"),
+    cols = unit(3.407253, "cm")
+  )
+p
+```
+
+
+```{r}
+ggsave(
+  here("figures", "manuscript", "FigS1_HM1_E14_comparison.svg"), plot = p,
+  device = svglite::svglite, width = 90, height = 90, unit = "mm",
+  fix_text_size = FALSE
+)
+```
+
+## Context
+
+We get a correlation of 0.93 for HM1 and E14.
+To know if this is high or low, we need context.
+So, we are going to sample an equal number of cells a number of times and see what the correlation is like for two sets of cells (1) coming from the same sample or (2) coming from different samples.
+
+### Same sample
+
+```{r}
+i <- which(exp$sample == "120h (-M)" & exp$batch == "timecourse2")
+n <- sum(exp$sample == "HM1 WT")
+m <- sum(exp$sample == "E14 WT")
+
+cors_same <- vapply(1:1000, function(...) {
+  a <- sample(i, n)
+  b <- sample(setdiff(i, a), m)
+  a <- rowMeans(assay(exp)[, a])
+  b <- rowMeans(assay(exp)[, b])
+  cor(a, b)
+}, numeric(1))
+summary(cors_same)
+```
+
+### Different samples
+
+```{r}
+i <- which(exp$sample == "72h")
+j <- which(exp$sample == "96h")
+
+cors_different <- vapply(1:1000, function(...) {
+  a <- sample(i, n)
+  b <- sample(j, m)
+  a <- rowMeans(assay(exp)[, a])
+  b <- rowMeans(assay(exp)[, b])
+  cor(a, b)
+}, numeric(1))
+summary(cors_different)
+```
+
+Conclusion: the E14 and HM1 samples correlate better than cells that we know are from the same sample. Therefore, there should be no major concern about exchangeability of cell lines.
+
+## Raw QC
+
+```{r}
+raw_meta <- rbind(raw_meta1, raw_meta2[, -6])
+raw_qc <- raw_meta$QC_stats
+raw_qc$batch <- raw_meta$batch
+raw_qc$sample <- raw_meta$sample
+raw_qc <- as.data.frame(raw_qc)
+raw_qc$tss_score[is.nan(raw_qc$tss_score)] <- 0
+
+asinh_trans <- function() {
+  trans_new(
+    "asinh",
+    transform = asinh,
+    inverse   = sinh
+  )
+}
+
+size <- 3.407253
+
+p <- ggplot(subset(raw_qc, tss_score > 0), aes(unique + 1, tss_score)) +
+  ggrastr::rasterise(
+    ggpointdensity::geom_pointdensity(
+      size = 0.1, adjust = 0.1
+    ), dpi = 300, dev = "ragg_png"
+  ) +
+  geom_hline(yintercept = 4, linetype = "dotted") +
+  geom_vline(xintercept = 2000, linetype = "dotted") +
+  scale_colour_viridis_c(
+    name = "Neighbours",
+    guide = guide_colourbar(barheight = unit(size, "cm"), barwidth = unit(2.5, "mm")),
+    limits = c(0, NA)
+  ) +
+  scale_x_continuous(
+    trans  = "log10",
+    labels = label_log(),
+    name   = "Unique Nuclear Reads + 1"
+  ) +
+  scale_y_continuous(
+    trans = "log10",
+    breaks = c(0, 1, 2, 4, 8, 16, 32, 64),
+    name = "TSS Score"
+  ) +
+  guides(
+    x.sec = guide_axis_manual(breaks = 2000, labels = "2.000", position = "top"),
+    y.sec = guide_axis_manual(breaks = 4, labels = "4", position = "right")
+  ) +
+  force_panelsizes(
+    rows = unit(size, "cm"),
+    cols = unit(size, "cm")
+  ) +
+  annotate(
+    "text", 
+    x = c(0, Inf, Inf, 0),
+    y = c(0, 0, Inf, Inf),
+    label = c("\u2717", "\u2717", "\u2713", "\u2717"),
+    hjust = c(-0.5, 1.5, 1.5, -0.5),
+    vjust = c(-0.5, -0.5, 1.5, 1.5),
+    colour = c("#e41a1c", "#e41a1c", "#4daf4a", "#e41a1c"),
+    size  = 4.2
+  ) +
+  theme(
+    axis.line.x.top   = element_blank(),
+    axis.ticks.x.top  = element_blank(),
+    axis.line.y.right = element_blank(),
+    axis.ticks.y.right = element_blank()
+  )
+p
+```
+
+
+```{r}
+ggsave(
+  here("figures", "manuscript", "FigS1_QC_inclusion.svg"), plot = p,
+  device = svglite::svglite, width = 90, height = 90, unit = "mm",
+  fix_text_size = FALSE
+)
+```
+
+
+## QC
+
+### Unique reads
+
+```{r}
+exp <- exp[, meta$batch != "KOs",]
+meta <- colData(exp)
+qc <- meta$QC_stats
+
+df <- as.data.frame(qc)
+df <- cbind(df, x = reducedDim(exp, "UMAP")[, 1], y = reducedDim(exp, "UMAP")[, 2])
+df$clust <- exp$clusters$cluster
+
+clust_nms <- setNames(
+  c("Prog", "NMP", "SC", "SMD", "PxMD", "PhMD", "Enth", "Endo"),
+  sort(unique(df$clust))
+)
+
+
+cols <- metadata(exp$clusters)$colours
+cols <- setNames(cols, LETTERS[1:8])
+
+asp <- diff(range(df$x)) / diff(range(df$y))
+
+edge_colour <- function(x, value = 0.3) {
+  colorspace::darken(x, 1 - value)
+}
+
+make_density_plot <- function(data, x) {
+  ggplot(data, aes({{x}}, clust, fill = clust)) +
+    stat_halfeye(
+      aes(alpha = stat(cut_cdf_qi(cdf))),
+      point_interval = NULL
+    ) +
+    stat_halfeye(
+      aes(slab_colour = stage(clust, after_scale = edge_colour(slab_colour))),
+      fill = NA, slab_size = 0.5, point_interval = NULL
+    ) +
+    scale_y_discrete(
+      limits = rev(names(clust_nms)),
+      labels = rev(clust_nms),
+      expand = c(0, 0),
+      name   = "Cluster"
+    ) +
+    scale_colour_manual(
+      aesthetics = c("fill", "colour"),
+      values = cols
+    ) +
+    scale_alpha_manual(
+      values = c(1, 0.6, 0.3)
+    ) +
+    guides(
+      alpha = "none",
+      fill  = "none",
+      slab_colour = "none"
+    ) +
+    force_panelsizes(
+      rows = unit(3 / asp, "cm"),
+      cols = unit(3 / asp * (2 / (1 + sqrt(5))), "cm")
+    )
+}
+
+dens <- make_density_plot(df, unique) +
+  scale_x_log10(
+    limits = c(1e3, 1e6),
+    expand = c(0, 0),
+    labels = label_log(),
+    name = NULL
+  ) +
+  ggtitle("Unique nuclear reads")
+
+make_umap_plot <- function(data, value) {
+  ggplot(data, aes(x, y, colour = {{value}})) +
+    rasterise(
+      geom_outline_point(
+        stroke_colour = "black",
+        size = 0.5
+      ), dpi = 300, dev = "ragg_png") +
+  coord_equal() +
+  scale_x_continuous(breaks = function(x) {sum(x)/2}, 
+                     labels = "UMAP 1", name = NULL) +
+  scale_y_continuous(breaks = NULL, name = "UMAP 2") +
+  theme(aspect.ratio = NULL,
+        axis.ticks.x.bottom = element_blank(),
+        axis.text.x.bottom  = element_text(size = 8),
+        panel.grid.major.x  = element_blank()) +
+  force_panelsizes(
+    rows = unit(3 / asp, "cm"),
+    cols = unit(3, "cm")
+  )
+}
+
+umap <- make_umap_plot(df, unique) +
+  scale_colour_continuous_sequential(
+    name   = NULL,
+    trans  = "log10",
+    labels = label_log(),
+    limits = c(1e3, 1e6),
+    palette = "Mako",
+    guide = guide_colourbar(
+      barwidth = unit(2.5, "mm"),
+      barheight = unit(3 / asp, "cm")
+    )
+  )
+
+gt1 <- ggplotGrob(dens)
+gt2 <- ggplotGrob(umap)
+gt <- cbind(gt1, gt2)
+
+grid.newpage(); grid.draw(gt)
+```
+
+```{r}
+svglite::svglite(
+  here("figures", "manuscript", "FigS1_QC_Nuclear_Reads.svg"), 
+  width  = convertUnit(unit(10, "cm"), "inch", valueOnly = TRUE), 
+  height = convertUnit(unit(10, "cm"), "inch", valueOnly = TRUE),
+  fix_text_size = FALSE
+)
+grid.newpage(); grid.draw(gt)
+dev.off()
+```
+
+
+### Mitochondrial
+
+```{r}
+df$frac_mito <- df$mito_unique / (df$mito_unique + df$unique)
+
+dens <- make_density_plot(df, frac_mito) + 
+  scale_x_continuous(
+    limits = c(0, 0.2), breaks = c(0, 0.1, 0.2),
+    name = NULL, oob = oob_squish
+  ) +
+  ggtitle("Fraction mitochondrial reads")
+
+umap <- make_umap_plot(df, frac_mito) +
+  scale_colour_continuous_sequential(
+    name = NULL,
+    limits = c(0, 0.2), breaks = c(0, 0.1, 0.2),
+    palette = "Mako",
+    oob = oob_squish,
+    guide = guide_colourbar(
+      barwidth = unit(2.5, "mm"),
+      barheight = unit(3 / asp, "cm")
+    )
+  )
+
+gt1 <- ggplotGrob(dens)
+gt2 <- ggplotGrob(umap)
+gt <- cbind(gt1, gt2)
+
+grid.newpage(); grid.draw(gt)
+```
+
+```{r}
+svglite::svglite(
+  here("figures", "manuscript", "FigS1_QC_Mitochondrial_Reads.svg"), 
+  width  = convertUnit(unit(10, "cm"), "inch", valueOnly = TRUE), 
+  height = convertUnit(unit(10, "cm"), "inch", valueOnly = TRUE),
+  fix_text_size = FALSE
+)
+grid.newpage(); grid.draw(gt)
+dev.off()
+```
+
+### FRiP
+
+```{r}
+dens <- make_density_plot(df, FRiP) + 
+  scale_x_continuous(
+    limits = c(0.1, 0.7), expand = c(0, 0),
+    breaks = breaks_width(0.2), name = NULL
+  ) +
+  ggtitle("Fraction of reads in peaks")
+
+umap <- make_umap_plot(df, FRiP) +
+  scale_colour_continuous_sequential(
+    name = NULL,
+    limits = c(0.1, 0.7), breaks = breaks_width(0.2),
+    palette = "Mako",
+    guide = guide_colourbar(
+      barwidth = unit(2.5, "mm"),
+      barheight = unit(3 / asp, "cm")
+    )
+  )
+
+gt1 <- ggplotGrob(dens)
+gt2 <- ggplotGrob(umap)
+gt <- cbind(gt1, gt2)
+
+grid.newpage(); grid.draw(gt)
+```
+
+```{r}
+svglite::svglite(
+  here("figures", "manuscript", "FigS1_QC_FRiP.svg"), 
+  width  = convertUnit(unit(10, "cm"), "inch", valueOnly = TRUE), 
+  height = convertUnit(unit(10, "cm"), "inch", valueOnly = TRUE),
+  fix_text_size = FALSE
+)
+grid.newpage(); grid.draw(gt)
+dev.off()
+```
+
+### Duplication
+
+```{r}
+df$frac_dup <- df$duplicated_reads / (df$unique + df$duplicates)
+
+dens <- make_density_plot(df, frac_dup) + 
+  scale_x_continuous(
+    limits = c(0, 0.6),
+    breaks = c(0, 0.2, 0.4, 0.6),
+    expand = c(0,0), name = NULL
+  ) +
+  ggtitle("Fraction duplicated reads")
+
+umap <- make_umap_plot(df, frac_dup) +
+  scale_colour_continuous_sequential(
+    name = NULL,
+    limits = c(0, 0.6), breaks = c(0, 0.2, 0.4, 0.6),
+    palette = "Mako",
+    guide = guide_colourbar(
+      barwidth = unit(2.5, "mm"),
+      barheight = unit(3 / asp, "cm")
+    )
+  )
+
+gt1 <- ggplotGrob(dens)
+gt2 <- ggplotGrob(umap)
+gt <- cbind(gt1, gt2)
+
+grid.newpage(); grid.draw(gt)
+```
+
+```{r}
+svglite::svglite(
+  here("figures", "manuscript", "FigS1_QC_Duplicated_Reads.svg"), 
+  width  = convertUnit(unit(10, "cm"), "inch", valueOnly = TRUE), 
+  height = convertUnit(unit(10, "cm"), "inch", valueOnly = TRUE),
+  fix_text_size = FALSE
+)
+grid.newpage(); grid.draw(gt)
+dev.off()
+```
+
+### GC
+
+```{r}
+dens <- make_density_plot(df, GC_content) + 
+  scale_x_continuous(
+    limits = c(0.4, 0.5),
+    breaks = c(0.4, 0.45, 0.5),
+    labels = c("0.40", "0.45", ">0.50"),
+    expand = c(0,0), name = NULL,
+    oob = scales::oob_squish
+  ) +
+  ggtitle("GC content")
+
+umap <- make_umap_plot(df, GC_content) +
+  scale_colour_continuous_sequential(
+    name = NULL,
+    limits = c(0.4, 0.5), breaks = c(0.4, 0.45, 0.5),
+    labels = c("0.40", "0.45", ">0.50"),
+    oob = oob_squish,
+    palette = "Mako",
+    guide = guide_colourbar(
+      barwidth = unit(2.5, "mm"),
+      barheight = unit(3 / asp, "cm")
+    )
+  )
+
+gt1 <- ggplotGrob(dens)
+gt2 <- ggplotGrob(umap)
+gt <- cbind(gt1, gt2)
+
+grid.newpage(); grid.draw(gt)
+```
+
+```{r}
+svglite::svglite(
+  here("figures", "manuscript", "FigS1_QC_GC_content.svg"), 
+  width  = convertUnit(unit(10, "cm"), "inch", valueOnly = TRUE), 
+  height = convertUnit(unit(10, "cm"), "inch", valueOnly = TRUE),
+  fix_text_size = FALSE
+)
+grid.newpage(); grid.draw(gt)
+dev.off()
+```
+
+## Batch correction
+
+```{r}
+exp <- readRDS(here("rds", "06_LSI_experiment.rds"))
+
+pca_raw <- reducedDim(exp, "LSI-integrated")
+pca_cor <- reducedDim(exp, "LSI-integrated-corrected")
+
+set.seed(790520)
+umap_raw <- uwot::umap(pca_raw[, 2:50], metric = "cosine", init = "agspectral")
+
+set.seed(790520)
+umap_cor <- uwot::umap(pca_cor[, 2:50], metric = "cosine", init = "agspectral")
+
+umaps <- rbindlist(list(raw = as.data.frame(umap_raw), 
+                        cor = as.data.frame(umap_cor)),
+                   idcol = "type")
+umaps$batch <- rep(exp$batch, 2)
+umaps$clust <- rep(exp$clusters$cluster, 2)
+umaps$type <- factor(umaps$type, c("raw", "cor"),
+                     c("Not integrated", "Integrated"))
+umaps[, V1 := V1 - 0.5 * sum(range(V1)), by = "type"]
+umaps[, V2 := V2 - 0.5 * sum(range(V2)), by = "type"]
+
+
+p <- ggplot(umaps[sample(nrow(umaps)), ], aes(V1, V2, colour = batch)) +
+  rasterise(
+    geom_outline_point(
+      aes(stroke_colour = after_scale(edge_colour(colour))),
+      size = 0.5
+    ), dpi = 300, dev = "ragg_png"
+  )+
+  scale_colour_manual(
+    name   = "Batch",
+    limits = c("pilot", "timecourse", "timecourse2", "KOs"),
+    values = c("#fed500", "#009bef", "#ff5c49", "#949494"),
+    labels = c("1", "2", "3", "4"),
+    guide  = guide_legend(override.aes = list(size = 1))
+  ) +
+  facet_wrap(~ type) +
+  coord_equal() +
+  scale_x_continuous(breaks = NULL, name = "UMAP 1") +
+  scale_y_continuous(breaks = NULL, name = "UMAP 2") +
+  force_panelsizes(rows = unit(3, "cm"), cols = unit(3, "cm")) +
+  theme(
+    strip.text.x = element_text(hjust = 0)
+  )
+p
+```
+
+```{r}
+ggsave(
+  here("figures", "manuscript", "FigS1_Batch_Correction.svg"), plot = p,
+  device = svglite::svglite, width = 90, height = 90, unit = "mm",
+  fix_text_size = FALSE
+)
+```
+
+## Aim
+
+## References
+
+<div id="refs"></div>
+
+## Session Info
+
+```{r session_info, include=TRUE, echo=FALSE, results = "asis"}
+pkgs <- loadedNamespaces()
+libTvdB::format_sessioninfo_html(pkgs)
+```

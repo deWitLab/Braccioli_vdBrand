@@ -1,0 +1,289 @@
+
+### Libraries
+
+```{r, results = 'hide', warning = FALSE, message = FALSE}
+library(ggplot2)
+library(data.table)
+library(stringr)
+library(dplyr)
+library(mgcv)
+
+library(RColorBrewer)
+```
+
+## Importing results
+```{r}
+results <- list.files(path = "../chimeras_E14/", recursive = TRUE, pattern = ".csv$", full.names = TRUE)
+
+values_example <- read.csv(results[1], header = T)
+print(values_example)
+
+data <- lapply(results, read.csv)
+
+
+
+str <- tstrsplit(results, "/")
+
+names(data) <- paste(str[[4]], str[[5]], str[[6]]) 
+
+
+# Count number of rows in every dataset
+n_rows <- unlist(lapply(data, nrow))
+# Combine all the dataset
+df <- data.table::rbindlist(data, idcol = "id", fill = TRUE)
+
+# This is weird data table syntax
+df[, norm_dist := GFP_Distance / max(GFP_Distance), by = id] 
+#df[, norm_dist_2 := CDX2_Distance / max(CDX2_Distance), by = id] 
+
+#df <- df %>% mutate(norm_dist = coalesce(norm_dist, norm_dist_2))
+
+#df$norm_dist_2 <- NULL
+
+df[, norm_FOXC1  := FOXC1 / max(FOXC1), by = id]
+df[, norm_SOX2 := SOX2 / max(SOX2), by = id]
+df[, norm_mCherry := mCherry / max(mCherry), by = id]
+df[, norm_GFP := GFP / max(GFP), by = id]
+
+df <- as.data.frame(df)
+
+# Make metadata parallel to datasets
+
+info <- tstrsplit(df$id," +")
+
+replicate <- info[[2]]
+
+line <- info[[1]]
+
+metadata <- cbind(df$id, replicate, line)
+
+
+
+# Make pretty names
+colnames(metadata) <- c("sample_id", "replicate", "line")
+
+# Combine data with metadata
+df <- cbind(df, metadata)
+
+
+
+
+
+```
+
+
+```{r}
+
+#plotting
+
+rep1 <- df %>% filter(df$replicate== "REP1")
+
+rep2 <- df %>% filter(df$replicate== "REP2")
+
+
+ggplot(rep1, aes(norm_dist, SOX2))+
+  geom_line(aes(color = line)) + 
+   geom_point(size=.1) +
+   facet_wrap(~line)
+
+ggplot(rep2, aes(norm_dist, SOX2))+
+  geom_line(aes(color = line)) + 
+   geom_point(size=.1) +
+   facet_wrap(~line)
+
+
+
+ggplot(df, aes(norm_dist, CDX2))+
+  geom_line(aes(color = treatment)) + 
+   geom_point(size=.1)
+
+
+```
+
+```{R}
+#my_colors <- brewer.pal(nlevels(as.factor(df$treat_time)))
+
+
+#scatterplotMatrix(~treatment+lines+CDX2|treat_time, data=df , 
+ #     reg.line="" , smoother="", col=my_colors , 
+  #    smoother.args=list(col="grey") , cex=1.5 , 
+   #   pch=c(15,16,17) , 
+    #  main="Scatter plot with Three Cylinder Options"
+      #)
+
+```
+
+```{r}
+
+chimeras <- df %>% filter(df$line == c("E14+4-5", "E14+3-7"))
+
+single <- df %>% filter(df$line == c("E14", "3-7", "4-5"))
+
+
+chimeras%>%
+ggplot(aes(norm_dist), colour = sample_id) +
+  geom_line(aes(y = norm_SOX2, colour = "SOX2"), alpha = 0.2) +
+ geom_line(aes(y = norm_GFP, colour = "GFP"), alpha = 0.2) +
+  geom_line(aes(y = norm_mCherry, colour = "mCherry"), alpha = 0.2) +
+  geom_smooth(aes(y = norm_SOX2, colour = "SOX2")) +
+  geom_smooth (aes(y = norm_GFP, colour = "GFP")) +
+  geom_smooth (aes(y = norm_mCherry, colour = "mCherry")) +
+  scale_colour_manual(
+  values = c( "green", "magenta", "cyan")
+  ) +
+  facet_wrap(~line) +
+  theme_classic() +
+  xlab("Relative A-P distance") +
+  ylab ("norm. fluorescence intensity") +
+  theme(panel.spacing=unit(0.4,"cm"))
+
+single_rep1 <- single %>% filter(single$replicate == c("REP1"))
+single_rep2 <- single %>% filter(single$replicate == c("REP2"))
+
+
+single_rep1%>%
+ggplot(aes(norm_dist), colour = sample_id) +
+  geom_line(aes(y = SOX2, colour = "SOX2"), alpha = 0.2) +
+ # geom_line(aes(y = FOXC1, colour = "FOXC1"), alpha = 0.2) +
+  geom_smooth(aes(y = SOX2, colour = "SOX2")) +
+  #geom_smooth(aes(y = FOXC1, colour = "FOXC1")) +
+  scale_colour_manual(
+  values = c( "cyan", "orange")
+  ) +
+  facet_wrap(~line) +
+  theme_classic() +
+  xlab("Relative A-P distance") +
+  ylab ("fluorescence intensity") +
+  theme(panel.spacing=unit(0.4,"cm"))
+
+single_rep2%>%
+ggplot(aes(norm_dist), colour = sample_id) +
+  geom_line(aes(y = SOX2, colour = "SOX2"), alpha = 0.2) +
+ # geom_line(aes(y = FOXC1, colour = "FOXC1"), alpha = 0.2) +
+  geom_smooth(aes(y = SOX2, colour = "SOX2")) +
+  #geom_smooth(aes(y = FOXC1, colour = "FOXC1")) +
+  scale_colour_manual(
+  values = c( "cyan", "orange")
+  ) +
+  facet_wrap(~line) +
+  theme_classic() +
+  xlab("Relative A-P distance") +
+  ylab ("fluorescence intensity") +
+  theme(panel.spacing=unit(0.4,"cm"))
+
+
+
+
+
+```
+```{r}
+data <- lapply(results, data.table::fread)
+names(data) <- basename(results)
+data <- data.table::rbindlist(data, idcol = "id", fill = TRUE)
+data[, norm_dist := GFP_Distance / max(GFP_Distance), by = id]
+data[, exp := tstrsplit(id, "_", keep = 1)[[1]]]
+data[, rep := tstrsplit(id, "_| ")[[2]]]
+data[, SOX2_norm  := SOX2 / mean(SOX2), by = "id"]
+data[, FOXC1_norm := FOXC1 / mean(FOXC1), by = "rep"]
+
+base <- ggplot(data, aes(norm_dist)) +
+  geom_line(aes(group = id, colour = exp), alpha = 0.1) +
+  geom_smooth(
+    aes(group = interaction(exp, rep), colour = exp),
+    span = 0.1, method = "loess", formula = y ~ x,
+    se = FALSE
+  ) +
+  scale_x_continuous(
+    name = "Relative A-P Distance",
+    breaks = scales::breaks_width(0.2)
+  ) +
+  scale_colour_manual(
+    values = c("#D55E00", "#E69F00", "#009E73", "#0072B2",  "#56B4E9"),
+    name = "Composition",
+    labels = c("Clone 3-7", "Clone 4-5", "E14 (WT)", "Chimera 3-7", "Chimera 4-5")
+  )
+
+base + aes(y = SOX2_norm) +
+  scale_y_continuous(name = "Relative SOX2 intensity (per gastruloid)")
+
+base + aes(y = FOXC1_norm) +
+  scale_y_continuous(name = "Relative FOXC1 intensity (per replicate)")
+
+base + aes(y = GFP / (GFP + mCherry)) +
+  scale_y_continuous(name = "Fraction GFP expression", breaks = scales::breaks_width(0.2))
+```
+
+```{r}
+RhpcBLASctl::blas_set_num_threads(1)
+
+# Function to calculate trend and sd
+trend_sd <- function(x, y, xout = seq(min(x), max(x), length.out = 200)) {
+  force(xout)
+  xy <- data.frame(x = x, y = y)
+  xy <- xy[order(xy$x),]
+  newdata <- data.frame(x = xout)
+  
+  fit <- loess(y ~ x, data = xy)
+  trend <- predict(fit, newdata = newdata)
+  
+  resid <- residuals(fit)
+  resid_fit <- loess(I(r^2) ~ x, data = data.frame(r = resid, x = xy$x))
+  sd <- sqrt(pmax(0, predict(resid_fit, newdata = newdata)))
+  
+  data.frame(x = xout, mean = trend, sd = sd)
+}
+
+# Split data by variables
+# trends <- split(df, with(df, interaction(sample_id, drop = TRUE)))
+trends <- split(df, df$treatment)
+
+# Fit LOESS model for every set
+trends <- lapply(trends, function(dat) {
+  print(dat$id[1])
+  
+  # missing_Bra <- all(is.na(dat$norm_Bra))
+  # missing_CDX2 <- all(is.na(dat$norm_CDX2))
+  
+  # Make models
+  Bra_dat  <- trend_sd(dat$norm_dist, dat$norm_Bra)
+  CDX2_dat <- trend_sd(dat$norm_dist, dat$norm_CDX2)
+  
+  # Format output
+  data.frame(
+    x = c(Bra_dat$x, CDX2_dat$x),
+    mean = c(Bra_dat$mean, CDX2_dat$mean),
+    sd = c(Bra_dat$sd, CDX2_dat$sd),
+    fluor = rep(c("BRA", "CDX2"), c(nrow(Bra_dat), nrow(CDX2_dat))),
+    treatment = dat$treatment[1]
+    # treatment = df$treatment[1]
+  )
+})
+
+# Combine all data
+trends <- do.call(rbind, unname(trends))
+
+ggplot(trends, aes(x, mean)) +
+  geom_ribbon(aes(ymin = mean - sd, ymax = mean + sd, fill = treatment),
+              alpha = 0.3) +
+  geom_path(aes(colour = treatment)) +
+  scale_y_continuous(
+                      name = "Relative Intensity (Mean \u00b1 SD)") +
+  scale_x_continuous(limits = c(0, 1), breaks = seq(0, 1, by = 0.2),
+                     labels = scales::number_format(scale = 1e2),
+                     name = "A - P Distance (%)") +
+  scale_colour_manual(
+    values = c("#4daf4a", "#e41a1c"),
+    aesthetics = c("fill", "colour"),
+    name = "Treatment"
+  ) +
+  facet_wrap(~fluor) +
+  theme(strip.background = element_blank(),
+        legend.position = c(0.05, 1),
+        legend.justification = c(0, 1),
+        panel.grid.minor = element_blank(),
+        panel.grid.major = element_line(colour = "grey95", size = 0.3),
+        panel.background = element_blank())
+```
+
+```
+

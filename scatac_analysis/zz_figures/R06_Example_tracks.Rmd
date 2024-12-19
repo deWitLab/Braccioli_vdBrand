@@ -1,0 +1,981 @@
+---
+title: "Rebuttal: example PhMD tracks"
+author: 
+  - name: "Teun van den Brand"
+    email: "t.vd.brand@nki.nl"
+    affiliation: "Netherlands Cancer Institute"
+date: '`r format(Sys.time(), "%d/%m/%Y")`'
+output: 
+  html_document:
+    theme: united
+    highlight: pygments
+    fig_caption: yes
+    code_folding: hide
+    df_print: kable
+    toc: true
+    toc_depth: 4
+    toc_float:
+      collapsed: false
+bibliography: /DATA/users/t.vd.brand/bibliography/articles.bibtex
+knit: |
+  # Redirect output to HTML folder
+  (function(inputFile, encoding) {
+    outputFile <- gsub("Rmd$", "html", basename(inputFile))
+    rmarkdown::render(
+      input = inputFile,
+      encoding = encoding,
+      output_file = here::here("html", outputFile)
+    )
+  })
+---
+
+## Setup {.tabset}
+
+<!-- little HTML script to do indentation of the table of contents -->
+<script>
+    $(document).ready(function() {
+      $items = $('div#TOC li');
+      $items.each(function(idx) {
+        num_ul = $(this).parentsUntil('#TOC').length;
+        $(this).css({'text-indent': num_ul * 10, 'padding-left': 0});
+      });
+
+    });
+</script>
+
+```{css, echo = FALSE}
+div.sourceCode {
+  overflow-x: hidden;
+}
+```
+
+### Load packages
+
+```{r stfu, include = FALSE}
+# No, I do *not* want your start-up messages, thank you very much
+library <- function(...) {
+  suppressPackageStartupMessages(base::library(...))
+}
+```
+
+
+```{r load_packages}
+library(ggplot2)
+library(scales)
+library(here)
+library(SingleCellExperiment)
+library(rtracklayer)
+library(data.table)
+source(here("rscripts", "project_functions_plotting.R"))
+```
+
+### Load data
+
+```{r load_data}
+vvliet <- readRDS("/DATA/projects/gastruloids/analysis/gastruloids_project/rds/XX_veenvliet2020_sce_preprocessed.rds")
+vvliet_rows <- rowData(vvliet)
+vvliet_counts <- assay(vvliet, "logcounts")
+vvliet_umap <- reducedDim(vvliet, "UMAP_orig")
+vvliet_umap <- setNames(as.data.frame(vvliet_umap), c("x", "y"))
+
+
+gast <- readRDS(here("rds", "06_LSI_experiment.rds"))
+
+bw_gast <- list.files(
+  here("data_raw", "bigwig"),
+  pattern = "^06_Cluster_", full.names = TRUE
+)
+bw_gast <- setNames(
+  bw_gast,
+  gsub("^06_Cluster_|\\.bw$", "", basename(bw_gast))
+)
+bw_gast <- BigWigFileList(bw_gast[-length(bw_gast)])
+```
+
+```{r}
+plot_vvliet <- function(genes) {
+  match <- match(genes, vvliet_rows$gene_symbol)
+  
+  if (anyNA(match)) {
+    mismatch <- genes[is.na(match)]
+    mismatch <- paste0(mismatch, collapse = ", ")
+    stop(paste0("Cannot find genes: ", mismatch))
+  }
+  
+  match <- vvliet_counts[match, , drop = FALSE]
+  match <- as.data.frame(t(as.matrix(match)))
+  colnames(match) <- genes
+  
+  # if (length(genes) > 1) {
+  #   match[] <- lapply(match, rescale)
+  # }
+  # 
+  
+  df <- cbind.data.frame(cluster = vvliet$cluster, match)
+  df <- tidyr::pivot_longer(df, -1)
+  
+  ggplot(df, aes(value, cluster)) +
+    geom_boxplot(outlier.colour = "#00000044") +
+    facet_grid(~ name, scales = "free_x")
+  
+  # 
+  # g <- ggplot(df, aes(x, y, colour = value)) +
+  #   geom_point(size = 0.5) +
+  #   scale_x_continuous(name = "UMAP 1", breaks = NULL) +
+  #   scale_y_continuous(name = "UMAP 2", breaks = NULL) +
+  #   coord_equal() +
+  #   theme(aspect.ratio = NULL)
+  # 
+  # if (length(genes) > 1) {
+  #   g <- g + facet_wrap(~ name) +
+  #     scale_colour_viridis_c(option = "A", breaks = c(0, 1), 
+  #                            labels = c("Min", "Max"),
+  #                            name = expression("Log"[2]*" Expression"))
+  # } else {
+  #   g <- g + scale_colour_viridis_c(option = "A",
+  #                                   name = expression("Log"[2]*"Expression"))
+  # }
+  # g
+}
+```
+
+
+### Setup Aesthetics
+
+```{r setup_aes}
+mycolour <- "#000000FF" # Opaque Black
+
+theme_set(theme_gray())
+theme_update(text = element_text(colour = mycolour),
+             line = element_line(colour = mycolour),
+             aspect.ratio = 1,
+             axis.line  = element_line(colour = mycolour),
+             axis.ticks = element_line(colour = mycolour),
+             axis.text  = element_text(colour = mycolour),
+             legend.key = element_blank(),
+             legend.background = element_rect(colour = NA, fill = NA),
+             panel.background = element_blank(),
+             panel.grid.major = element_line(colour = "grey95"),
+             panel.grid.minor = element_blank(),
+             plot.background  = element_blank(),
+             strip.background = element_blank(),
+             strip.text = element_text(colour = mycolour))
+CYRUP <- c("#fed500", "#009bef", "#ff5c49", "#949494", "#D8D8D8")
+rm(mycolour)
+colours <- metadata(gast$clusters)$colours
+```
+
+## Aim
+
+### SOX2
+
+```{r}
+loci <- c("Sox2" = "chr3:34615001-34826883")
+loci <- GRanges(loci)
+start(loci) <- round(start(loci), -4)
+end(loci) <- round(end(loci), -4)
+
+binwidth <- 500
+tracks <- lapply(bw_gast, function(bw) {
+  dat <- summary(bw, which = loci, size = ceiling(width(loci) / binwidth),
+                 as = "GRangesList", type = "mean")
+  dat <- lapply(dat, function(d) {
+    mid <- mid(d)
+    data.frame(
+      x = c(min(mid), mid, max(mid)),
+      y = c(0, score(d), 0)
+    )
+  })
+  data.table::rbindlist(setNames(dat, names(loci)), idcol = "locus")
+})
+tracks <- data.table::rbindlist(tracks, idcol = "clust")
+
+tracks[, y_scaled := rescale(y, to = c(0, 0.95)), by = "locus"]
+tracks$clust_match <- match(tracks$clust, names(bw_gast))
+tracks[, y_shift := y_scaled + 7 - clust_match]
+
+ylim <- tracks[, max(y), by = "locus"]
+ylim <- setNames(ylim$V1, ylim$locus)
+nice_ylim_labs <- setNames(c(25, 25, 40, 25, 20, 35), names(ylim))
+nice_ylim_breaks <- (nice_ylim_labs / ylim) * 0.95
+
+xlim <- tracks[, range(x), by = "locus"]
+
+breaks <- c(0, rep(0.95, ))
+breaks <- rep(c(0, 0.95), 7) + rep(0:7, each = 2)
+labels <- c(0, rep("", 7))
+
+facet_lvls <- c("", "Average accessibility (%)")
+
+genes <- retrieve_ncbi_genemodel(
+  loci, names(loci),
+  facet = factor(facet_lvls[[1]], facet_lvls)
+)
+
+i <- match(genes$locus, names(loci))
+genes$xmin <- pmin(pmax(start(loci)[i], genes$xmin), end(loci)[i])
+genes$xmax <- pmax(pmin(end(loci)[i], genes$xmax), start(loci)[i])
+```
+
+
+```{r}
+alt <- copy(tracks)
+alt[, trim := y > 30]
+alt[, y_trim := pmin(y, 30)]
+alt[, y_scaled := rescale(y_trim, to = c(0, 0.95))]
+alt$clust_match <- match(tracks$clust, names(bw_gast))
+alt[, y_shift := y_scaled + 7 - clust_match]
+
+tick <- rescale(25, to = c(0, 0.95), from = c(0, 30))
+
+y_scale <- scale_y_continuous(
+  expand = c(0,0),
+  breaks = c(0, tick + 1 * 0:6),
+  labels = function(x) {
+    c(0, rep('"', length(x) - 2), "25")
+  },
+  limits = c(0, 6.95),
+  guide = ggh4x::guide_axis_truncated(
+    trunc_lower = 0:6,
+    trunc_upper = 0:6 + tick
+  )
+)
+
+labels <- data.frame(
+  clust = LETTERS[1:7],
+  label = c("Prog", "NMP", "SC", "SMD", "PxMD", "PhMD", "Enth"),
+  x = Inf,
+  y_shift = 6:0 + tick,
+  locus = levels(factor(names(loci)))[1],
+  facet = facet_lvls[2]
+)
+
+alt_plot <- ggplot(tracks, aes(x, y_shift)) +
+  geom_polygon(
+    data = ~ cbind(.x, facet = factor(facet_lvls[2], facet_lvls)),
+    aes(fill = clust, colour = after_scale(colorspace::darken(fill, 0.3))),
+    size = 0.25
+  ) +
+  geom_hline(
+    data = data.frame(facet = facet_lvls[2], brk = 0:6),
+    aes(yintercept = brk)
+  ) +
+  geom_genemodel_rects(genes, thin = 0.5, thick = 0.5) +
+  geom_text(
+    data = labels,
+    aes(label = label, colour = clust),
+    hjust = 0, vjust = 1
+  ) +
+  scale_fill_manual(
+    aesthetics = c("colour", "fill"),
+    values = colours, name = "Cluster",
+    guide = "none"
+  ) +
+  scale_x_continuous(
+    breaks = start(loci), 
+    labels = paste0(seqnames(loci), ":", 
+                    number(start(loci), big.mark = ","), "-", 
+                    number(end(loci), big.mark = ",")), 
+    expand = c(0,0)
+  ) +
+  ggh4x::facet_grid2(
+    vars(facet), vars(locus),
+    scales = "free", space = "free_x",
+    switch = "y", axes = "y", remove_labels = "y",
+    strip = ggh4x::strip_themed(
+      clip = "off",
+      text_y = ggh4x::elem_list_text(angle = c(0, 90), vjust = c(0.5, 0))
+    )
+  ) +
+  ggh4x::facetted_pos_scales(
+    y = list(
+      facet == "" ~ scale_y_continuous(limits = c(-2, 2), guide = "none"),
+      TRUE ~ y_scale
+    )
+  ) +
+  labs(y = NULL, x = NULL) +
+  ggh4x::force_panelsizes(
+    rows = unit(c(0.5, 5.25), "cm"),
+    cols = unit(5, "cm")
+  ) +
+  theme(
+    aspect.ratio = NULL,
+    panel.grid.major   = element_blank(),
+    strip.placement    = "outside",
+    axis.line.y.right  = element_blank(),
+    axis.ticks.y.right = element_blank(),
+    axis.text.y.right  = element_text(vjust = 0, face = "bold"),
+    axis.text.y.left   = element_text(hjust = 1, margin = margin(r = 2.2, l = 2.2)),
+    strip.background.x = ggh4x::element_part_rect(side = "b", colour = "black", fill = NA),
+    strip.text.y.left  = element_text(colour = NA),
+    axis.ticks.length.x.top = unit(-1, "cm"),
+    # axis.ticks.length.x.bottom = unit(0, "pt"),
+    # axis.ticks.x.bottom = element_blank(),
+    axis.text.x.bottom = element_text(hjust = 0),
+    axis.line.x.top = element_blank(),
+    plot.margin = unit(c(0,0,0,0), "pt")
+  )
+
+
+ggsave(
+  here("figures", "manuscript", "Rev_Sox2_locus.svg"),
+  plot = alt_plot,
+  device = svglite::svglite, width = 100, height = 100, units = "mm",
+  fix_text_size = FALSE
+)
+
+alt_plot
+```
+
+### TBXT
+
+```{r}
+loci <- c("T" = "chr17:8407106-8469984")
+loci <- GRanges(loci)
+start(loci) <- round(start(loci), -4)
+end(loci) <- round(end(loci), -4)
+
+binwidth <- 500
+tracks <- lapply(bw_gast, function(bw) {
+  dat <- summary(bw, which = loci, size = ceiling(width(loci) / binwidth),
+                 as = "GRangesList", type = "mean")
+  dat <- lapply(dat, function(d) {
+    mid <- mid(d)
+    data.frame(
+      x = c(min(mid), mid, max(mid)),
+      y = c(0, score(d), 0)
+    )
+  })
+  data.table::rbindlist(setNames(dat, names(loci)), idcol = "locus")
+})
+tracks <- data.table::rbindlist(tracks, idcol = "clust")
+
+tracks[, y_scaled := rescale(y, to = c(0, 0.95)), by = "locus"]
+tracks$clust_match <- match(tracks$clust, names(bw_gast))
+tracks[, y_shift := y_scaled + 7 - clust_match]
+
+ylim <- tracks[, max(y), by = "locus"]
+ylim <- setNames(ylim$V1, ylim$locus)
+nice_ylim_labs <- setNames(c(25, 25, 40, 25, 20, 35), names(ylim))
+nice_ylim_breaks <- (nice_ylim_labs / ylim) * 0.95
+
+xlim <- tracks[, range(x), by = "locus"]
+
+breaks <- c(0, rep(0.95, ))
+breaks <- rep(c(0, 0.95), 7) + rep(0:7, each = 2)
+labels <- c(0, rep("", 7))
+
+facet_lvls <- c("", "Average accessibility (%)")
+
+genes <- retrieve_ncbi_genemodel(
+  loci, names(loci),
+  facet = factor(facet_lvls[[1]], facet_lvls)
+)
+
+i <- match(genes$locus, names(loci))
+genes$xmin <- pmin(pmax(start(loci)[i], genes$xmin), end(loci)[i])
+genes$xmax <- pmax(pmin(end(loci)[i], genes$xmax), start(loci)[i])
+```
+
+
+```{r}
+alt <- copy(tracks)
+alt[, trim := y > 30]
+alt[, y_trim := pmin(y, 30)]
+alt[, y_scaled := rescale(y_trim, to = c(0, 0.95))]
+alt$clust_match <- match(tracks$clust, names(bw_gast))
+alt[, y_shift := y_scaled + 7 - clust_match]
+
+tick <- rescale(25, to = c(0, 0.95), from = c(0, 30))
+
+y_scale <- scale_y_continuous(
+  expand = c(0,0),
+  breaks = c(0, tick + 1 * 0:6),
+  labels = function(x) {
+    c(0, rep('"', length(x) - 2), "25")
+  },
+  limits = c(0, 6.95),
+  guide = ggh4x::guide_axis_truncated(
+    trunc_lower = 0:6,
+    trunc_upper = 0:6 + tick
+  )
+)
+
+labels <- data.frame(
+  clust = LETTERS[1:7],
+  label = c("Prog", "NMP", "SC", "SMD", "PxMD", "PhMD", "Enth"),
+  x = Inf,
+  y_shift = 6:0 + tick,
+  locus = levels(factor(names(loci)))[1],
+  facet = facet_lvls[2]
+)
+
+alt_plot <- ggplot(tracks, aes(x, y_shift)) +
+  geom_polygon(
+    data = ~ cbind(.x, facet = factor(facet_lvls[2], facet_lvls)),
+    aes(fill = clust, colour = after_scale(colorspace::darken(fill, 0.3))),
+    size = 0.25
+  ) +
+  geom_hline(
+    data = data.frame(facet = facet_lvls[2], brk = 0:6),
+    aes(yintercept = brk)
+  ) +
+  geom_genemodel_rects(genes, thin = 0.5, thick = 0.5) +
+  geom_text(
+    data = labels,
+    aes(label = label, colour = clust),
+    hjust = 0, vjust = 1
+  ) +
+  scale_fill_manual(
+    aesthetics = c("colour", "fill"),
+    values = colours, name = "Cluster",
+    guide = "none"
+  ) +
+  scale_x_continuous(
+    breaks = start(loci), 
+    labels = paste0(seqnames(loci), ":", 
+                    number(start(loci), big.mark = ","), "-", 
+                    number(end(loci), big.mark = ",")), 
+    expand = c(0,0)
+  ) +
+  ggh4x::facet_grid2(
+    vars(facet), vars(locus),
+    scales = "free", space = "free_x",
+    switch = "y", axes = "y", remove_labels = "y",
+    strip = ggh4x::strip_themed(
+      clip = "off",
+      text_y = ggh4x::elem_list_text(angle = c(0, 90), vjust = c(0.5, 0))
+    )
+  ) +
+  ggh4x::facetted_pos_scales(
+    y = list(
+      facet == "" ~ scale_y_continuous(limits = c(-2, 2), guide = "none"),
+      TRUE ~ y_scale
+    )
+  ) +
+  labs(y = NULL, x = NULL) +
+  ggh4x::force_panelsizes(
+    rows = unit(c(0.5, 5.25), "cm"),
+    cols = unit(5, "cm")
+  ) +
+  theme(
+    aspect.ratio = NULL,
+    panel.grid.major   = element_blank(),
+    strip.placement    = "outside",
+    axis.line.y.right  = element_blank(),
+    axis.ticks.y.right = element_blank(),
+    axis.text.y.right  = element_text(vjust = 0, face = "bold"),
+    axis.text.y.left   = element_text(hjust = 1, margin = margin(r = 2.2, l = 2.2)),
+    strip.background.x = ggh4x::element_part_rect(side = "b", colour = "black", fill = NA),
+    strip.text.y.left  = element_text(colour = NA),
+    axis.ticks.length.x.top = unit(-1, "cm"),
+    # axis.ticks.length.x.bottom = unit(0, "pt"),
+    # axis.ticks.x.bottom = element_blank(),
+    axis.text.x.bottom = element_text(hjust = 0),
+    axis.line.x.top = element_blank(),
+    plot.margin = unit(c(0,0,0,0), "pt")
+  )
+
+
+ggsave(
+  here("figures", "manuscript", "Rev_Tbxt_locus.svg"),
+  plot = alt_plot,
+  device = svglite::svglite, width = 100, height = 100, units = "mm",
+  fix_text_size = FALSE
+)
+
+alt_plot
+```
+
+### Nkx3-1
+
+```{r}
+loci <- c("Nkx3-1" = "chr14:69172878-69214218")
+loci <- GRanges(loci)
+start(loci) <- round(start(loci), -4)
+end(loci) <- round(end(loci), -4)
+
+binwidth <- 500
+tracks <- lapply(bw_gast, function(bw) {
+  dat <- summary(bw, which = loci, size = ceiling(width(loci) / binwidth),
+                 as = "GRangesList", type = "mean")
+  dat <- lapply(dat, function(d) {
+    mid <- mid(d)
+    data.frame(
+      x = c(min(mid), mid, max(mid)),
+      y = c(0, score(d), 0)
+    )
+  })
+  data.table::rbindlist(setNames(dat, names(loci)), idcol = "locus")
+})
+tracks <- data.table::rbindlist(tracks, idcol = "clust")
+
+tracks[, y_scaled := rescale(y, to = c(0, 0.95)), by = "locus"]
+tracks$clust_match <- match(tracks$clust, names(bw_gast))
+tracks[, y_shift := y_scaled + 7 - clust_match]
+
+ylim <- tracks[, max(y), by = "locus"]
+ylim <- setNames(ylim$V1, ylim$locus)
+nice_ylim_labs <- setNames(c(25, 25, 40, 25, 20, 35), names(ylim))
+nice_ylim_breaks <- (nice_ylim_labs / ylim) * 0.95
+
+xlim <- tracks[, range(x), by = "locus"]
+
+breaks <- c(0, rep(0.95, ))
+breaks <- rep(c(0, 0.95), 7) + rep(0:7, each = 2)
+labels <- c(0, rep("", 7))
+
+facet_lvls <- c("", "Average accessibility (%)")
+
+genes <- retrieve_ncbi_genemodel(
+  loci, names(loci),
+  facet = factor(facet_lvls[[1]], facet_lvls)
+)
+
+i <- match(genes$locus, names(loci))
+genes$xmin <- pmin(pmax(start(loci)[i], genes$xmin), end(loci)[i])
+genes$xmax <- pmax(pmin(end(loci)[i], genes$xmax), start(loci)[i])
+```
+
+
+```{r}
+alt <- copy(tracks)
+alt[, trim := y > 30]
+alt[, y_trim := pmin(y, 30)]
+alt[, y_scaled := rescale(y_trim, to = c(0, 0.95))]
+alt$clust_match <- match(tracks$clust, names(bw_gast))
+alt[, y_shift := y_scaled + 7 - clust_match]
+
+tick <- rescale(25, to = c(0, 0.95), from = c(0, 30))
+
+y_scale <- scale_y_continuous(
+  expand = c(0,0),
+  breaks = c(0, tick + 1 * 0:6),
+  labels = function(x) {
+    c(0, rep('"', length(x) - 2), "25")
+  },
+  limits = c(0, 6.95),
+  guide = ggh4x::guide_axis_truncated(
+    trunc_lower = 0:6,
+    trunc_upper = 0:6 + tick
+  )
+)
+
+labels <- data.frame(
+  clust = LETTERS[1:7],
+  label = c("Prog", "NMP", "SC", "SMD", "PxMD", "PhMD", "Enth"),
+  x = Inf,
+  y_shift = 6:0 + tick,
+  locus = levels(factor(names(loci)))[1],
+  facet = facet_lvls[2]
+)
+
+alt_plot <- ggplot(tracks, aes(x, y_shift)) +
+  geom_polygon(
+    data = ~ cbind(.x, facet = factor(facet_lvls[2], facet_lvls)),
+    aes(fill = clust, colour = after_scale(colorspace::darken(fill, 0.3))),
+    size = 0.25
+  ) +
+  geom_hline(
+    data = data.frame(facet = facet_lvls[2], brk = 0:6),
+    aes(yintercept = brk)
+  ) +
+  geom_genemodel_rects(genes, thin = 0.5, thick = 0.5) +
+  geom_text(
+    data = labels,
+    aes(label = label, colour = clust),
+    hjust = 0, vjust = 1
+  ) +
+  scale_fill_manual(
+    aesthetics = c("colour", "fill"),
+    values = colours, name = "Cluster",
+    guide = "none"
+  ) +
+  scale_x_continuous(
+    breaks = start(loci), 
+    labels = paste0(seqnames(loci), ":", 
+                    number(start(loci), big.mark = ","), "-", 
+                    number(end(loci), big.mark = ",")), 
+    expand = c(0,0)
+  ) +
+  ggh4x::facet_grid2(
+    vars(facet), vars(locus),
+    scales = "free", space = "free_x",
+    switch = "y", axes = "y", remove_labels = "y",
+    strip = ggh4x::strip_themed(
+      clip = "off",
+      text_y = ggh4x::elem_list_text(angle = c(0, 90), vjust = c(0.5, 0))
+    )
+  ) +
+  ggh4x::facetted_pos_scales(
+    y = list(
+      facet == "" ~ scale_y_continuous(limits = c(-2, 2), guide = "none"),
+      TRUE ~ y_scale
+    )
+  ) +
+  labs(y = NULL, x = NULL) +
+  ggh4x::force_panelsizes(
+    rows = unit(c(0.5, 5.25), "cm"),
+    cols = unit(5, "cm")
+  ) +
+  theme(
+    aspect.ratio = NULL,
+    panel.grid.major   = element_blank(),
+    strip.placement    = "outside",
+    axis.line.y.right  = element_blank(),
+    axis.ticks.y.right = element_blank(),
+    axis.text.y.right  = element_text(vjust = 0, face = "bold"),
+    axis.text.y.left   = element_text(hjust = 1, margin = margin(r = 2.2, l = 2.2)),
+    strip.background.x = ggh4x::element_part_rect(side = "b", colour = "black", fill = NA),
+    strip.text.y.left  = element_text(colour = NA),
+    axis.ticks.length.x.top = unit(-1, "cm"),
+    # axis.ticks.length.x.bottom = unit(0, "pt"),
+    # axis.ticks.x.bottom = element_blank(),
+    axis.text.x.bottom = element_text(hjust = 0),
+    axis.line.x.top = element_blank(),
+    plot.margin = unit(c(0,0,0,0), "pt")
+  )
+
+
+ggsave(
+  here("figures", "manuscript", "Rev_Nkx31_locus.svg"),
+  plot = alt_plot,
+  device = svglite::svglite, width = 100, height = 100, units = "mm",
+  fix_text_size = FALSE
+)
+
+alt_plot
+```
+
+### Sox9
+
+```{r}
+loci <- c("Sox9" = "chr11:112565304-112888563")
+loci <- GRanges(loci)
+start(loci) <- round(start(loci), -4)
+end(loci) <- round(end(loci), -4)
+
+binwidth <- 500
+tracks <- lapply(bw_gast, function(bw) {
+  dat <- summary(bw, which = loci, size = ceiling(width(loci) / binwidth),
+                 as = "GRangesList", type = "mean")
+  dat <- lapply(dat, function(d) {
+    mid <- mid(d)
+    data.frame(
+      x = c(min(mid), mid, max(mid)),
+      y = c(0, score(d), 0)
+    )
+  })
+  data.table::rbindlist(setNames(dat, names(loci)), idcol = "locus")
+})
+tracks <- data.table::rbindlist(tracks, idcol = "clust")
+
+tracks[, y_scaled := rescale(y, to = c(0, 0.95)), by = "locus"]
+tracks$clust_match <- match(tracks$clust, names(bw_gast))
+tracks[, y_shift := y_scaled + 7 - clust_match]
+
+ylim <- tracks[, max(y), by = "locus"]
+ylim <- setNames(ylim$V1, ylim$locus)
+nice_ylim_labs <- setNames(c(25, 25, 40, 25, 20, 35), names(ylim))
+nice_ylim_breaks <- (nice_ylim_labs / ylim) * 0.95
+
+xlim <- tracks[, range(x), by = "locus"]
+
+breaks <- c(0, rep(0.95, ))
+breaks <- rep(c(0, 0.95), 7) + rep(0:7, each = 2)
+labels <- c(0, rep("", 7))
+
+facet_lvls <- c("", "Average accessibility (%)")
+
+genes <- retrieve_ncbi_genemodel(
+  loci, names(loci),
+  facet = factor(facet_lvls[[1]], facet_lvls)
+)
+
+i <- match(genes$locus, names(loci))
+genes$xmin <- pmin(pmax(start(loci)[i], genes$xmin), end(loci)[i])
+genes$xmax <- pmax(pmin(end(loci)[i], genes$xmax), start(loci)[i])
+```
+
+
+```{r}
+alt <- copy(tracks)
+alt[, trim := y > 30]
+alt[, y_trim := pmin(y, 30)]
+alt[, y_scaled := rescale(y_trim, to = c(0, 0.95))]
+alt$clust_match <- match(tracks$clust, names(bw_gast))
+alt[, y_shift := y_scaled + 7 - clust_match]
+
+tick <- rescale(25, to = c(0, 0.95), from = c(0, 30))
+
+y_scale <- scale_y_continuous(
+  expand = c(0,0),
+  breaks = c(0, tick + 1 * 0:6),
+  labels = function(x) {
+    c(0, rep('"', length(x) - 2), "25")
+  },
+  limits = c(0, 6.95),
+  guide = ggh4x::guide_axis_truncated(
+    trunc_lower = 0:6,
+    trunc_upper = 0:6 + tick
+  )
+)
+
+labels <- data.frame(
+  clust = LETTERS[1:7],
+  label = c("Prog", "NMP", "SC", "SMD", "PxMD", "PhMD", "Enth"),
+  x = Inf,
+  y_shift = 6:0 + tick,
+  locus = levels(factor(names(loci)))[1],
+  facet = facet_lvls[2]
+)
+
+alt_plot <- ggplot(tracks, aes(x, y_shift)) +
+  geom_polygon(
+    data = ~ cbind(.x, facet = factor(facet_lvls[2], facet_lvls)),
+    aes(fill = clust, colour = after_scale(colorspace::darken(fill, 0.3))),
+    size = 0.25
+  ) +
+  geom_hline(
+    data = data.frame(facet = facet_lvls[2], brk = 0:6),
+    aes(yintercept = brk)
+  ) +
+  geom_genemodel_rects(genes, thin = 0.5, thick = 0.5) +
+  geom_text(
+    data = labels,
+    aes(label = label, colour = clust),
+    hjust = 0, vjust = 1
+  ) +
+  scale_fill_manual(
+    aesthetics = c("colour", "fill"),
+    values = colours, name = "Cluster",
+    guide = "none"
+  ) +
+  scale_x_continuous(
+    breaks = start(loci), 
+    labels = paste0(seqnames(loci), ":", 
+                    number(start(loci), big.mark = ","), "-", 
+                    number(end(loci), big.mark = ",")), 
+    expand = c(0,0)
+  ) +
+  ggh4x::facet_grid2(
+    vars(facet), vars(locus),
+    scales = "free", space = "free_x",
+    switch = "y", axes = "y", remove_labels = "y",
+    strip = ggh4x::strip_themed(
+      clip = "off",
+      text_y = ggh4x::elem_list_text(angle = c(0, 90), vjust = c(0.5, 0))
+    )
+  ) +
+  ggh4x::facetted_pos_scales(
+    y = list(
+      facet == "" ~ scale_y_continuous(limits = c(-2, 2), guide = "none"),
+      TRUE ~ y_scale
+    )
+  ) +
+  labs(y = NULL, x = NULL) +
+  ggh4x::force_panelsizes(
+    rows = unit(c(0.5, 5.25), "cm"),
+    cols = unit(5, "cm")
+  ) +
+  theme(
+    aspect.ratio = NULL,
+    panel.grid.major   = element_blank(),
+    strip.placement    = "outside",
+    axis.line.y.right  = element_blank(),
+    axis.ticks.y.right = element_blank(),
+    axis.text.y.right  = element_text(vjust = 0, face = "bold"),
+    axis.text.y.left   = element_text(hjust = 1, margin = margin(r = 2.2, l = 2.2)),
+    strip.background.x = ggh4x::element_part_rect(side = "b", colour = "black", fill = NA),
+    strip.text.y.left  = element_text(colour = NA),
+    axis.ticks.length.x.top = unit(-1, "cm"),
+    # axis.ticks.length.x.bottom = unit(0, "pt"),
+    # axis.ticks.x.bottom = element_blank(),
+    axis.text.x.bottom = element_text(hjust = 0),
+    axis.line.x.top = element_blank(),
+    plot.margin = unit(c(0,0,0,0), "pt")
+  )
+
+
+ggsave(
+  here("figures", "manuscript", "Rev_Sox9_locus.svg"),
+  plot = alt_plot,
+  device = svglite::svglite, width = 100, height = 100, units = "mm",
+  fix_text_size = FALSE
+)
+
+alt_plot
+```
+
+### Meox1
+
+```{r}
+loci <- c("Meox1" = "chr11:101869144-101909550")
+loci <- GRanges(loci)
+start(loci) <- round(start(loci), -4)
+end(loci) <- round(end(loci), -4)
+
+binwidth <- 500
+tracks <- lapply(bw_gast, function(bw) {
+  dat <- summary(bw, which = loci, size = ceiling(width(loci) / binwidth),
+                 as = "GRangesList", type = "mean")
+  dat <- lapply(dat, function(d) {
+    mid <- mid(d)
+    data.frame(
+      x = c(min(mid), mid, max(mid)),
+      y = c(0, score(d), 0)
+    )
+  })
+  data.table::rbindlist(setNames(dat, names(loci)), idcol = "locus")
+})
+tracks <- data.table::rbindlist(tracks, idcol = "clust")
+
+tracks[, y_scaled := rescale(y, to = c(0, 0.95)), by = "locus"]
+tracks$clust_match <- match(tracks$clust, names(bw_gast))
+tracks[, y_shift := y_scaled + 7 - clust_match]
+
+ylim <- tracks[, max(y), by = "locus"]
+ylim <- setNames(ylim$V1, ylim$locus)
+nice_ylim_labs <- setNames(c(25, 25, 40, 25, 20, 35), names(ylim))
+nice_ylim_breaks <- (nice_ylim_labs / ylim) * 0.95
+
+xlim <- tracks[, range(x), by = "locus"]
+
+breaks <- c(0, rep(0.95, ))
+breaks <- rep(c(0, 0.95), 7) + rep(0:7, each = 2)
+labels <- c(0, rep("", 7))
+
+facet_lvls <- c("", "Average accessibility (%)")
+
+genes <- retrieve_ncbi_genemodel(
+  loci, names(loci),
+  facet = factor(facet_lvls[[1]], facet_lvls)
+)
+
+i <- match(genes$locus, names(loci))
+genes$xmin <- pmin(pmax(start(loci)[i], genes$xmin), end(loci)[i])
+genes$xmax <- pmax(pmin(end(loci)[i], genes$xmax), start(loci)[i])
+```
+
+
+```{r}
+alt <- copy(tracks)
+alt[, trim := y > 30]
+alt[, y_trim := pmin(y, 30)]
+alt[, y_scaled := rescale(y_trim, to = c(0, 0.95))]
+alt$clust_match <- match(tracks$clust, names(bw_gast))
+alt[, y_shift := y_scaled + 7 - clust_match]
+
+tick <- rescale(25, to = c(0, 0.95), from = c(0, 30))
+
+y_scale <- scale_y_continuous(
+  expand = c(0,0),
+  breaks = c(0, tick + 1 * 0:6),
+  labels = function(x) {
+    c(0, rep('"', length(x) - 2), "25")
+  },
+  limits = c(0, 6.95),
+  guide = ggh4x::guide_axis_truncated(
+    trunc_lower = 0:6,
+    trunc_upper = 0:6 + tick
+  )
+)
+
+labels <- data.frame(
+  clust = LETTERS[1:7],
+  label = c("Prog", "NMP", "SC", "SMD", "PxMD", "PhMD", "Enth"),
+  x = Inf,
+  y_shift = 6:0 + tick,
+  locus = levels(factor(names(loci)))[1],
+  facet = facet_lvls[2]
+)
+
+alt_plot <- ggplot(tracks, aes(x, y_shift)) +
+  geom_polygon(
+    data = ~ cbind(.x, facet = factor(facet_lvls[2], facet_lvls)),
+    aes(fill = clust, colour = after_scale(colorspace::darken(fill, 0.3))),
+    size = 0.25
+  ) +
+  geom_hline(
+    data = data.frame(facet = facet_lvls[2], brk = 0:6),
+    aes(yintercept = brk)
+  ) +
+  geom_genemodel_rects(genes, thin = 0.5, thick = 0.5) +
+  geom_text(
+    data = labels,
+    aes(label = label, colour = clust),
+    hjust = 0, vjust = 1
+  ) +
+  scale_fill_manual(
+    aesthetics = c("colour", "fill"),
+    values = colours, name = "Cluster",
+    guide = "none"
+  ) +
+  scale_x_continuous(
+    breaks = start(loci), 
+    labels = paste0(seqnames(loci), ":", 
+                    number(start(loci), big.mark = ","), "-", 
+                    number(end(loci), big.mark = ",")), 
+    limits = c(start(loci), end(loci)), oob = oob_keep,
+    expand = c(0,0)
+  ) +
+  ggh4x::facet_grid2(
+    vars(facet), vars(locus),
+    scales = "free", space = "free_x",
+    switch = "y", axes = "y", remove_labels = "y",
+    strip = ggh4x::strip_themed(
+      clip = "off",
+      text_y = ggh4x::elem_list_text(angle = c(0, 90), vjust = c(0.5, 0))
+    )
+  ) +
+  ggh4x::facetted_pos_scales(
+    y = list(
+      facet == "" ~ scale_y_continuous(limits = c(-2, 2), guide = "none"),
+      TRUE ~ y_scale
+    )
+  ) +
+  labs(y = NULL, x = NULL) +
+  ggh4x::force_panelsizes(
+    rows = unit(c(0.5, 5.25), "cm"),
+    cols = unit(5, "cm")
+  ) +
+  theme(
+    aspect.ratio = NULL,
+    panel.grid.major   = element_blank(),
+    strip.placement    = "outside",
+    axis.line.y.right  = element_blank(),
+    axis.ticks.y.right = element_blank(),
+    axis.text.y.right  = element_text(vjust = 0, face = "bold"),
+    axis.text.y.left   = element_text(hjust = 1, margin = margin(r = 2.2, l = 2.2)),
+    strip.background.x = ggh4x::element_part_rect(side = "b", colour = "black", fill = NA),
+    strip.text.y.left  = element_text(colour = NA),
+    axis.ticks.length.x.top = unit(-1, "cm"),
+    # axis.ticks.length.x.bottom = unit(0, "pt"),
+    # axis.ticks.x.bottom = element_blank(),
+    axis.text.x.bottom = element_text(hjust = 0),
+    axis.line.x.top = element_blank(),
+    plot.margin = unit(c(0,0,0,0), "pt")
+  )
+
+
+ggsave(
+  here("figures", "manuscript", "Rev_Meox1_locus.svg"),
+  plot = alt_plot,
+  device = svglite::svglite, width = 100, height = 100, units = "mm",
+  fix_text_size = FALSE
+)
+
+alt_plot
+```
+
+
+## References
+
+<div id="refs"></div>
+
+## Session Info
+
+```{r session_info, include=TRUE, echo=FALSE, results = "asis"}
+pkgs <- loadedNamespaces()
+libTvdB::format_sessioninfo_html(pkgs)
+```

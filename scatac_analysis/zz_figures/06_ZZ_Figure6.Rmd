@@ -1,0 +1,298 @@
+---
+title: "Figure 6"
+author: 
+  - name: "Teun van den Brand"
+    email: "t.vd.brand@nki.nl"
+    affiliation: "Netherlands Cancer Institute"
+date: '`r format(Sys.time(), "%d/%m/%Y")`'
+output: 
+  html_document:
+    theme: united
+    highlight: pygments
+    fig_caption: yes
+    code_folding: hide
+    df_print: kable
+    toc: true
+    toc_depth: 4
+    toc_float:
+      collapsed: false
+bibliography: /DATA/users/t.vd.brand/bibliography/articles.bibtex
+knit: |
+  # Redirect output to HTML folder
+  (function(inputFile, encoding) {
+    outputFile <- gsub("Rmd$", "html", basename(inputFile))
+    rmarkdown::render(
+      input = inputFile,
+      encoding = encoding,
+      output_file = here::here("html", outputFile)
+    )
+  })
+---
+
+## Setup {.tabset}
+
+<!-- little HTML script to do indentation of the table of contents -->
+<script>
+    $(document).ready(function() {
+      $items = $('div#TOC li');
+      $items.each(function(idx) {
+        num_ul = $(this).parentsUntil('#TOC').length;
+        $(this).css({'text-indent': num_ul * 10, 'padding-left': 0});
+      });
+
+    });
+</script>
+
+```{css, echo = FALSE}
+div.sourceCode {
+  overflow-x: hidden;
+}
+```
+
+### Load packages
+
+```{r stfu, include = FALSE}
+# No, I do *not* want your start-up messages, thank you very much
+library <- function(...) {
+  suppressPackageStartupMessages(base::library(...))
+}
+```
+
+
+```{r load_packages}
+library(ggplot2)
+library(ggh4x)
+library(scales)
+library(SingleCellExperiment)
+library(here)
+library(ggrastr)
+library(colorspace)
+library(data.table)
+```
+
+### Load data
+
+```{r load_data}
+exp <- readRDS(here("rds", "06_LSI_experiment.rds"))
+```
+
+### Setup Aesthetics
+
+```{r setup_aes}
+source(here("rscripts", "project_functions_plotting.R"))
+```
+
+## Aim
+
+## KO UMAPs
+
+```{r}
+desatlight <- function(x, amount = 0.7) {
+  lighten(desaturate(x, amount), amount)
+}
+
+clust_colour <- metadata(exp$clusters)$colours
+
+umap <- reducedDim(exp, "UMAP")
+umap <- data.frame(
+  x = umap[, 1],
+  y = umap[, 2],
+  clust = exp$clusters$cluster,
+  sample = exp$sample
+)
+
+umap_coords <- list(
+  coord_equal(), theme(aspect.ratio = NULL),
+  scale_x_continuous(name = "UMAP 1", breaks = NULL),
+  scale_y_continuous(name = "UMAP 2", breaks = NULL)
+)
+levels(umap$sample) <- c(head(levels(umap$sample), -4),
+                         c("ΔCDX", "ΔMSGN1", "WT Parental", "WT E14"))
+umap$sample <- relevel(umap$sample, "WT Parental")
+
+labels <- data.frame(
+  x = c(4, 2, 4, -3, -5, -4, -4, 0),
+  y = c(-3, 3, 7, -4, -2, 4, 7, 0),
+  clust = LETTERS[1:8],
+  labels = c("Prog", "NMP", "SC", "SMD", "PxMD", "PhMD", "Enth", "Endo")
+)
+
+dx <- diff(expand_range(range(umap$x), 0.05))
+dy <- diff(expand_range(range(umap$y), 0.05))
+asp <- dy / dx
+
+p <- ggplot(mapping = aes(x, y)) +
+  rasterise(
+    geom_point(
+      data = transform(umap, sample = NULL),
+      aes(colour = stage(clust, after_scale = desatlight(colour, 0.7))),
+      size = 0.5
+    ),
+    dpi = 300, dev = "ragg"
+  ) +
+  rasterise(
+    geom_outline_point(
+      data = subset(umap, sample %in% c("ΔCDX", "ΔMSGN1", "WT Parental")),
+      aes(colour = clust,
+          stroke_colour = after_scale(darken(colour, 0.4))),
+      size = 0.5
+    ),
+    dpi = 300, dev = "ragg"
+  ) +
+  geom_text(
+    data = labels,
+    aes(label = labels, colour = clust)
+  ) +
+  scale_colour_manual(
+    values = clust_colour, guide = "none"
+  ) +
+  facet_wrap2(~ sample, ncol = 1, axes = "all") +
+  force_panelsizes(
+    rows = unit(38.192991064316277634991932951583 * asp, "mm"),
+    cols = unit(38.192991064316277634991932951583, "mm")
+  ) +
+  scale_x_continuous(
+    name = NULL, 
+    breaks = ~ sum(.x) / 2,
+    labels = "UMAP 1"
+  ) +
+  scale_y_continuous(
+    name = NULL, 
+    breaks = ~ sum(.x) / 2,
+    labels = "UMAP 2"
+  ) +
+  coord_equal() +
+  theme(
+    aspect.ratio = asp,
+    strip.text.x.top = element_text(hjust = 0),
+    panel.grid.major = element_blank(),
+    axis.text.y.left = element_text(angle = 90, hjust = 0.5, size = 8),
+    axis.text.x.bottom = element_text(size = 8),
+    axis.ticks = element_blank(),
+    axis.ticks.length = unit(0, "pt")
+  )
+p
+```
+
+```{r}
+ggsave(
+  here("figures", "manuscript", "Fig6A_UMAP_KOs.svg"), plot = p,
+  device = svglite::svglite, width = 180, height = 200, unit = "mm",
+  fix_text_size = FALSE
+)
+```
+
+## KO Proportions
+
+```{r}
+props <- setDT(umap)
+props <- props[sample %in% c("ΔCDX", "ΔMSGN1", "WT Parental")]
+props <- props[, .N, by = c("clust", "sample")]
+props <- props[, prop := N / sum(N), by = "sample"]
+props$clust <- factor(props$clust, levels = rev(c("C", "B", "A", "D", "E", "F", "G", "H")))
+props$label <- labels$labels[match(props$clust, labels$clust)]
+
+props[sample == "WT Parental" & label %in% c("Endo", "PhMD"), label := ""]
+props[sample == "ΔCDX" & label %in% c("NMP"), label := ""]
+props[sample == "ΔMSGN1" & label %in% c("NT", "Prog", "SMD"), label := ""]
+
+sums <- props[, sum(N), by = "sample"]
+ylabs <- sums[, paste0(sample, "\nn = ", V1)]
+
+phi <- 2 / (1 + sqrt(5))
+
+width <- grid::convertUnit(unit(3 * 3, "cm") + unit(5.5 * 2, "pt"), "cm", valueOnly = TRUE)
+
+
+p <- ggplot(props, aes(sample, prop, fill = clust)) +
+  geom_col(position = "stack", width = phi/1.5) +
+  geom_text(
+    aes(label = ifelse(prop > 0.02, percent(prop, 0.1), "")),
+    position = position_stack(vjust = 0.5),
+    show.legend = FALSE
+  ) +
+  geom_text(
+    aes(label = label, 
+        colour = stage(clust, after_scale = darken(colour, 0.3)),
+        x = stage(sample, after_scale = x + 0.5)),
+    position = position_stack(vjust = 0.5),
+    show.legend = FALSE
+  ) +
+  scale_x_discrete(
+    limits = c("WT Parental", "ΔCDX", "ΔMSGN1"),
+    labels = rev(ylabs),
+    name = NULL
+  ) +
+  scale_y_continuous(
+    breaks = breaks_width(0.2),
+    name   = "Proportion",
+    expand = c(0, 0)
+  ) +
+  scale_fill_manual(
+    aesthetics = c("colour", "fill"),
+    values = rev(clust_colour[c(3:1, 4:length(clust_colour))]),
+    guide = "none"
+  ) +
+  force_panelsizes(
+    # cols = unit(width, "cm"),
+    cols = unit(38.192991064316277634991932951583, "mm"),
+    # rows = unit(12 * 1.4 * 3, "pt")
+    rows = unit(52 - 3.766, "mm")
+  )
+
+# p <- ggplot(props, aes(prop, sample, fill = clust)) +
+#   geom_col(position = "stack", width = phi) +
+#   geom_text(
+#     aes(label = label, 
+#         colour = stage(clust, after_scale = darken(colour, 0.3)),
+#         y = stage(sample, after_scale = y + 0.5)),
+#     position = position_stack(vjust = 0.5),
+#     show.legend = FALSE
+#   ) +
+#   geom_text(
+#     aes(label = ifelse(prop > 0.02, percent(prop, 0.1), "")),
+#     position = position_stack(vjust = 0.5),
+#     show.legend = FALSE
+#   ) +
+#   scale_y_discrete(
+#     limits = rev(c("WT Parental", "ΔCDX", "ΔMSGN1")),
+#     labels = ylabs,
+#     name = NULL
+#   ) +
+#   scale_x_continuous(
+#     breaks = breaks_width(0.2),
+#     name   = "Proportion",
+#     expand = c(0, 0)
+#   ) +
+#   scale_fill_manual(
+#     aesthetics = c("colour", "fill"),
+#     values = rev(clust_colour[c(3:1, 4:length(clust_colour))]),
+#     guide = "none"
+#   ) +
+#   force_panelsizes(
+#     # cols = unit(width, "cm"),
+#     cols = unit(4, "cm"),
+#     rows = unit(12 * 1.4 * 3, "pt")
+#   )
+
+p
+```
+
+```{r}
+ggsave(
+  here("figures", "manuscript", "Fig6B_Proportions_KOs.svg"), plot = p,
+  device = svglite::svglite, width = 180, height = 80, unit = "mm",
+  fix_text_size = FALSE
+)
+```
+
+## References
+
+<div id="refs"></div>
+
+## Session Info
+
+```{r session_info, include=TRUE, echo=FALSE, results = "asis"}
+pkgs <- loadedNamespaces()
+libTvdB::format_sessioninfo_html(pkgs)
+```

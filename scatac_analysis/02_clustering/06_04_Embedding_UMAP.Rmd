@@ -1,0 +1,309 @@
+---
+title: "UMAP Embeddings"
+author: 
+  - name: "Teun van den Brand"
+    email: "t.vd.brand@nki.nl"
+    affiliation: "Netherlands Cancer Institute"
+date: '`r format(Sys.time(), "%d/%m/%Y")`'
+output: 
+  html_document:
+    theme: united
+    highlight: pygments
+    fig_caption: yes
+    code_folding: hide
+    df_print: kable
+    toc: true
+    toc_depth: 4
+    toc_float:
+      collapsed: false
+bibliography: /DATA/users/t.vd.brand/bibliography/articles.bibtex
+knit: |
+  # Redirect output to HTML folder
+  (function(inputFile, encoding) {
+    outputFile <- gsub("Rmd$", "html", basename(inputFile))
+    rmarkdown::render(
+      input = inputFile,
+      encoding = encoding,
+      output_file = here::here("html", outputFile)
+    )
+  })
+---
+
+## Setup {.tabset}
+
+<!-- little HTML script to do indentation of the table of contents -->
+<script>
+    $(document).ready(function() {
+      $items = $('div#TOC li');
+      $items.each(function(idx) {
+        num_ul = $(this).parentsUntil('#TOC').length;
+        $(this).css({'text-indent': num_ul * 10, 'padding-left': 0});
+      });
+
+    });
+</script>
+
+```{css, echo = FALSE}
+div.sourceCode {
+  overflow-x: hidden;
+}
+```
+
+### Load packages
+
+```{r stfu, include = FALSE}
+# No, I do *not* want your start-up messages, thank you very much
+library <- function(...) {
+  suppressPackageStartupMessages(base::library(...))
+}
+```
+
+
+```{r load_packages}
+library(SingleCellExperiment)
+library(uwot)
+
+library(ggplot2)
+library(scales)
+library(here)
+```
+
+ ### Load data
+
+```{r load_data}
+exp_file <- here("rds", "06_LSI_experiment.rds")
+exp <- readRDS(exp_file)
+```
+
+### Setup Aesthetics
+
+```{r setup_aes}
+mycolour <- "#000000FF" # Opaque Black
+
+theme_set(theme_gray())
+theme_update(text = element_text(colour = mycolour),
+             line = element_line(colour = mycolour),
+             aspect.ratio = 1,
+             axis.line  = element_line(colour = mycolour),
+             axis.ticks = element_line(colour = mycolour),
+             axis.text  = element_text(colour = mycolour),
+             legend.key = element_blank(),
+             legend.background = element_rect(colour = NA, fill = NA),
+             panel.background = element_blank(),
+             panel.grid.major = element_line(colour = "grey95"),
+             panel.grid.minor = element_blank(),
+             plot.background  = element_blank(),
+             strip.background = element_blank(),
+             strip.text = element_text(colour = mycolour))
+CYRUP <- c("#fed500", "#009bef", "#ff5c49", "#949494", "#D8D8D8")
+rm(mycolour)
+
+sample_colours <- c(brewer_pal(palette = "Set1")(9), "black")
+
+umap_xy_scales <- function(name = "UMAP", breaks = NULL, ...) {
+  list(
+    scale_x_continuous(paste(name, 1), breaks = breaks, ...),
+    scale_y_continuous(paste(name, 2), breaks = breaks, ...),
+    coord_equal(),
+    theme(aspect.ratio = NULL)
+  )
+}
+
+my_legend <- guide_legend(
+  override.aes = list(size = 2, alpha = 1)
+)
+
+scale_colour_samples <- function(
+  name   = "Samples", 
+  values = sample_colours, 
+  guide  = my_legend,
+  ...
+) {
+  scale_colour_manual(
+    name   = name,
+    values = values,
+    guide  = guide,
+    ...
+  )
+}
+
+template <- ggplot(mapping = aes(x, y, colour = sample)) +
+  geom_point(size = 0.5) +
+  umap_xy_scales() +
+  scale_colour_samples()
+```
+
+## Aim
+
+Make UMAPs of the single cell data using the **{uwot}** package. We'll do the following:
+
+1. Make UMAPs of the integrated data as a whole.
+2. Make UMAPs of the timeseries part of the integrated data, then project the knockout data on top.
+3. Make UMAPs of the projected data as a whole.
+4. Make UMAPs of the timeseries part of the projected data, then project the knockout data on top.
+
+## Integrated data
+
+```{r}
+set.seed(20220413)
+seeds <- sample(1e6, 5)
+
+pca <- reducedDim(exp, "LSI-integrated-corrected")
+pca <- pca[, 2:50]
+```
+
+### Whole data {.tabset}
+
+```{r}
+umaps_integrated_whole <- lapply(seeds, function(s) {
+  set.seed(s)
+  umap(pca, metric = "cosine", init = "agspectral")
+})
+
+plots <- Map(
+  function(umap, seed) {
+    df <- data.frame(
+      x = umap[, 1],
+      y = umap[, 2],
+      sample = exp$sample
+    )
+    template %+% df
+  },
+  umap = umaps_integrated_whole,
+  seed = seeds
+)
+```
+
+```{r, results = 'asis'}
+for (i in seeds) {
+  cat(paste0("\n\n#### Seed = ", i, "\n"))
+  print(plots[[match(i, seeds)]])
+}
+```
+
+### Project on timeseries {.tabset}
+
+```{r}
+is_timeseries <- exp$batch != "KOs"
+
+umaps_integrated_projected <- lapply(seeds, function(s) {
+  set.seed(s)
+  model <- umap(pca[is_timeseries, ], ret_model = TRUE,  metric = "cosine", init = "agspectral")
+  proj  <- umap_transform(pca[!is_timeseries, ], model = model)
+  rbind(
+    model$embedding,
+    proj
+  )
+})
+
+plots <- Map(
+  function(umap, seed) {
+    df <- data.frame(
+      x = umap[, 1],
+      y = umap[, 2],
+      sample = exp$sample
+    )
+    template %+% df
+  },
+  umap = umaps_integrated_projected,
+  seed = seeds
+)
+```
+
+```{r, results = 'asis'}
+for (i in seeds) {
+  cat(paste0("\n\n#### Seed = ", i, "\n"))
+  print(plots[[match(i, seeds)]])
+}
+```
+
+## Projected data
+
+```{r}
+pca <- reducedDim(exp, "LSI-projected-corrected")
+pca <- pca[, 2:50]
+```
+
+### Whole data {.tabset}
+
+```{r}
+umaps_projected_whole <- lapply(seeds, function(s) {
+  set.seed(s)
+  umap(pca, metric = "cosine", init = "agspectral")
+})
+
+plots <- Map(
+  function(umap, seed) {
+    df <- data.frame(
+      x = umap[, 1],
+      y = umap[, 2],
+      sample = exp$sample
+    )
+    template %+% df
+  },
+  umap = umaps_projected_whole,
+  seed = seeds
+)
+```
+
+```{r, results = 'asis'}
+for (i in seeds) {
+  cat(paste0("\n\n#### Seed = ", i, "\n"))
+  print(plots[[match(i, seeds)]])
+}
+```
+
+### Project on timeseries {.tabset}
+
+```{r}
+is_timeseries <- exp$batch != "KOs"
+
+umaps_projected_projected <- lapply(seeds, function(s) {
+  set.seed(s)
+  model <- umap(pca[is_timeseries, ], ret_model = TRUE,  metric = "cosine", init = "agspectral")
+  proj  <- umap_transform(pca[!is_timeseries, ], model = model)
+  rbind(
+    model$embedding,
+    proj
+  )
+})
+
+plots <- Map(
+  function(umap, seed) {
+    df <- data.frame(
+      x = umap[, 1],
+      y = umap[, 2],
+      sample = exp$sample
+    )
+    template %+% df
+  },
+  umap = umaps_projected_projected,
+  seed = seeds
+)
+```
+
+```{r, results = 'asis'}
+for (i in seeds) {
+  cat(paste0("\n\n#### Seed = ", i, "\n"))
+  print(plots[[match(i, seeds)]])
+}
+```
+
+## Save UMAP
+
+```{r}
+reducedDim(exp, "UMAP") <- umaps_integrated_whole[[3]]
+saveRDS(exp, exp_file)
+```
+
+
+## References
+
+<div id="refs"></div>
+
+## Session Info
+
+```{r session_info, include=TRUE, echo=FALSE, results = "asis"}
+pkgs <- loadedNamespaces()
+libTvdB::format_sessioninfo_html(pkgs)
+```

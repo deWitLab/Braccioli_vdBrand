@@ -1,0 +1,624 @@
+---
+title: "Embryo Comparison"
+author: 
+  - name: "Teun van den Brand"
+    email: "t.vd.brand@nki.nl"
+    affiliation: "Netherlands Cancer Institute"
+date: '`r format(Sys.time(), "%d/%m/%Y")`'
+output: 
+  html_document:
+    theme: united
+    highlight: pygments
+    fig_caption: yes
+    code_folding: hide
+    df_print: kable
+    toc: true
+    toc_depth: 4
+    toc_float:
+      collapsed: false
+bibliography: /DATA/users/t.vd.brand/bibliography/articles.bibtex
+knit: |
+  # Redirect output to HTML folder
+  (function(inputFile, encoding) {
+    outputFile <- gsub("Rmd$", "html", basename(inputFile))
+    rmarkdown::render(
+      input = inputFile,
+      encoding = encoding,
+      output_file = here::here("html", outputFile)
+    )
+  })
+---
+
+## Setup {.tabset}
+
+<!-- little HTML script to do indentation of the table of contents -->
+<script>
+    $(document).ready(function() {
+      $items = $('div#TOC li');
+      $items.each(function(idx) {
+        num_ul = $(this).parentsUntil('#TOC').length;
+        $(this).css({'text-indent': num_ul * 10, 'padding-left': 0});
+      });
+
+    });
+</script>
+
+```{css, echo = FALSE}
+div.sourceCode {
+  overflow-x: hidden;
+}
+```
+
+### Load packages
+
+```{r stfu, include = FALSE}
+# No, I do *not* want your start-up messages, thank you very much
+library <- function(...) {
+  suppressPackageStartupMessages(base::library(...))
+}
+```
+
+
+```{r load_packages}
+library(SingleCellExperiment)
+library(batchelor)
+library(Matrix)
+library(BiocFileCache)
+
+library(ggplot2)
+library(scales)
+library(patchwork)
+library(ggh4x)
+library(ggrepel)
+library(e1071)
+library(glue)
+library(here)
+library(data.table)
+```
+
+### Load data
+
+```{r load_data}
+combined_file <- here("rds", "06_emb_gas_processed_exp.rds")
+
+cells_gast <- readRDS(here("rds", "06_LSI_experiment.rds"))
+cells_gast <- colData(cells_gast)
+
+cells_embr <- readxl::read_excel(
+  "/DATA/users/t.vd.brand/projects/mouse_embryo/external_data/sciatac/metadata/41556_2020_489_MOESM3_ESM.xlsx"
+)
+
+gr_gast_time <- here("rds", "04_GRanges_joined.rds")
+gr_gast_kos  <- here("rds", "06_GRanges_KO.rds")
+
+blacklist <- bfcrpath(
+  BiocFileCache(),
+  "https://www.encodeproject.org/files/ENCFF547MET/@@download/ENCFF547MET.bed.gz"
+)
+blacklist <- rtracklayer::import(blacklist)
+
+reconstruct <- !file.exists(combined_file)
+```
+
+### Functions
+
+```{r}
+tf_idf <- function(
+  x,
+  frequencies = TRUE,
+  log = TRUE,
+  pseudo_scale = 1e5,
+  idf = NULL
+) {
+  requireNamespace("Matrix")
+  x <- as(x, "dgCMatrix")
+  
+  idf <- calculate_idf(x, idf = idf)
+  tf  <- calculate_tf(x, frequencies, log, pseudo_scale)
+  
+  tfidf   <- Matrix::t(tf)
+  tfidf@x <- tfidf@x * rep.int(idf, diff(tfidf@p))
+  tfidf   <- Matrix::t(tfidf)
+  
+  dimnames(tfidf) <- dimnames(x)
+  attr(tfidf, "idf") <- idf
+  tfidf
+}
+
+calculate_idf <- function(x, idf = NULL) {
+  if (!is.null(idf)) {
+    stopifnot(
+      "Length of `idf` argument needs to match `nrow(x)`" = 
+        length(idf) == nrow(x),
+      "The `idf` argument needs to be a numeric vector" =
+        is.numeric(idf)
+    )
+    return(idf)
+  }
+  log(1 + ncol(x) / Matrix::rowSums(x))
+}
+
+calculate_tf <- function(
+    x, 
+    frequencies = TRUE, log = TRUE, pseudo_scale = 10e5
+) {
+  if (isTRUE(frequencies)) {
+    tf <- Matrix::t(Matrix::t(x) / Matrix::colSums(x))
+  } else {
+    tf <- x
+  }
+  
+  if (isTRUE(log)) {
+    if (isTRUE(frequencies)) {
+      tf@x <- log1p(tf@x * pseudo_scale)
+    } else {
+      tf@x <- log1p(tf@x * 1)
+    }
+  }
+  
+  tf
+}
+```
+
+### Setup Aesthetics
+
+```{r setup_aes}
+mycolour <- "#000000FF" # Opaque Black
+
+theme_set(theme_gray())
+theme_update(text = element_text(colour = mycolour),
+             line = element_line(colour = mycolour),
+             aspect.ratio = 1,
+             axis.line  = element_line(colour = mycolour),
+             axis.ticks = element_line(colour = mycolour),
+             axis.text  = element_text(colour = mycolour),
+             legend.key = element_blank(),
+             legend.background = element_rect(colour = NA, fill = NA),
+             panel.background = element_blank(),
+             panel.grid.major = element_line(colour = "grey95"),
+             panel.grid.minor = element_blank(),
+             plot.background  = element_blank(),
+             strip.background = element_blank(),
+             strip.text = element_text(colour = mycolour))
+CYRUP <- c("#fed500", "#009bef", "#ff5c49", "#949494", "#D8D8D8")
+rm(mycolour)
+```
+
+## Aim
+
+## Join data
+
+### Peak calling
+
+```{r}
+peak_file <- here("rds", "04_emb_gas_combined_peaks.rds")
+
+if (reconstruct) {
+
+    if (!file.exists(peak_file)) {
+    library(rtracklayer)
+    library(Rsamtools)
+    
+    # MACS2 expect 0-indexed BED files
+    # We have 1-indexed Tabix files, hence we need to re-export the Tabix files
+    # as 0-indexed BED files before calling MACS2.
+    # rtracklayer::export.bed automatically converts 0-indexed GRanges to 1-indexed
+    # BED files
+    reexport_tabix <- function(infile, outfile, chunksize = 1e6) {
+      infile <- TabixFile(infile, yieldSize = chunksize)
+      open(infile)
+      on.exit(close(infile))
+      while (length({yield <- scanTabix(infile)[[1]]})) {
+        x <- read.table(
+          text = yield, sep = "\t", quote = "",
+          comment.char = "", as.is = TRUE,
+          colClasses = c("character", "integer", "integer")
+        )
+        x <- GRanges(x$V1, IRanges(x$V2, x$V3))
+        export.bed(x, outfile, append = TRUE)
+      }
+    }
+    
+    tmpfile <- tempfile(fileext = ".bed")
+    tmp_dir <- tempdir()
+    
+    tbx_gast <- here("data_raw", "tabix", "goodreads.bed.gz")
+    tbx_embr <- "/DATA/users/t.vd.brand/projects/mouse_embryo/external_data/sciatac/tabix/pijuansala2020.bed.gz"
+    
+    reexport_tabix(tbx_gast, tmpfile)
+    reexport_tabix(tbx_embr, tmpfile)
+    
+    cmd <- glue("macs2 callpeak -t {tmpfile} -f BEDPE -g mm --nomodel --keep-dup all --outdir {tmp_dir} -n combined")
+    system(cmd)
+    
+    peaks <- list.files(tmp_dir, pattern = "\\.narrowPeak$", full.names = TRUE)
+    peaks <- import(peaks)
+    saveRDS(peaks, peak_file)
+    files <- list.files(tmp_dir, full.names = TRUE)
+    lapply(files, unlink)
+    
+    
+    } else {
+    
+      peaks <- readRDS(peak_file)
+      peaks <- keepStandardChromosomes(peaks, "Mus_musculus", "coarse")
+      peaks <- peaks[!(seqnames(peaks) %in% c("chrM", "chrY"))]
+      peaks <- peaks[!overlapsAny(peaks, blacklist)]
+  }
+}
+```
+
+### Count matrix
+
+```{r}
+if (reconstruct) {
+  
+  if (!file.exists(combined_file)) {
+    
+    library(BiocParallel)
+    library(Rsamtools)
+    
+    # C++ function to quickly extract a column from in memory text
+    gnc <- as(granges(peaks), "GNCList")
+    
+    # Embryo data
+    tbx_emb <- "/DATA/users/t.vd.brand/projects/mouse_embryo/external_data/sciatac/tabix/pijuansala2020.bed.gz"
+    
+        Rcpp::cppFunction("
+std::vector<std::string> extract_barcode(CharacterVector a, int col) {
+  if(col < 1) Rcpp::stop(\"col must be a positive integer\");
+  std::vector<std::string> b = Rcpp::as<std::vector<std::string>>(a);
+  std::vector<std::string> result(a.size());
+  for(uint32_t i = 0; i < a.size() ; i++)
+  {
+    int n_tabs = 0;
+    std::string entry = \"\";
+    for(uint16_t j = 0; j < b[i].size(); j++)              
+    {
+      if(n_tabs == (col - 1) & b[i][j] != '\\t') entry.push_back(b[i][j]);
+      if((b[i][j]) == '\\t') n_tabs++;
+      if(n_tabs == col) break;
+    }
+    result[i] = entry;
+  }
+  return result;
+}
+
+")
+    
+    chunk_size <- 1000
+    chunks <- ceiling(length(peaks) / chunk_size)
+    chunks <- rep(seq_len(chunks), each = chunk_size)[seq_along(peaks)]
+    
+    features <- split(peaks, chunks)
+    counts <- bplapply(features, function(loci) {
+      
+      dat  <- scanTabix(tbx_emb, param = loci)
+      lens <- rep.int(seq_along(dat), lengths(dat))
+      dat  <- unlist(dat, FALSE, FALSE)
+      bc   <- extract_barcode(dat, 4)
+      bc   <- match(bc, cells_embr$barcode)
+      
+      dat  <- data.table(
+        cells = bc,
+        feats = lens
+      )
+      dat[!is.na(cells), .N, by = c("feats", "cells")]
+    }, BPPARAM = MulticoreParam(10))
+    
+    counts <- rbindlist(counts, idcol = "chunk")
+    counts[, chunk := as.integer(chunk) - 1L]
+    counts[, feats := feats + chunk * chunk_size]
+    counts <- counts[, sparseMatrix(i = feats, j = cells, x = rep(1, .N))]
+    
+    counts_embryo <- counts
+    
+    # Gastruloid timeseries data
+    reads <- readRDS(gr_gast_time)
+    alias <- paste0(
+      runValue(reads$barcode), "&", reads$batch[start(reads$barcode)]
+    )
+    alias <- match(alias, cells_gast$alias)
+    mcols(reads) <- DataFrame(alias = Rle(alias, runLength(reads$barcode)))
+    reads <- reads[!is.na(reads$alias)]
+    
+    dims <- c(length(gnc), nrow(cells_gast))
+    
+    counts <- findOverlaps(gnc, reads)
+    counts <- data.table(
+      feats = from(counts),
+      cells = decode(reads$alias[to(counts)])
+    )
+    counts <- counts[, .N, by = c("feats", "cells")]
+    counts <- counts[, sparseMatrix(i = feats, j = cells, x = rep(1, .N), dims = dims)]
+    counts_timeseries <- counts
+    
+    # Gastruloids KO data
+    reads <- readRDS(gr_gast_kos)
+    alias <- match(reads$barcode, gsub("&KOs$", "", cells_gast$alias))
+    mcols(reads) <- DataFrame(alias = alias)
+    reads <- reads[!is.na(reads$alias)]
+    
+    counts <- findOverlaps(gnc, reads)
+    counts <- data.table(
+      feats = from(counts),
+      cells = decode(reads$alias[to(counts)])
+    )
+    counts <- counts[, .N, by = c("feats", "cells")]
+    counts <- counts[, sparseMatrix(i = feats, j = cells, x = rep(1, .N), dims = dims)]
+    
+    counts_gastruloid <- counts + counts_timeseries
+    counts <- cbind(counts_gastruloid, counts_embryo)
+    
+    cdata <- DataFrame(
+      alias = c(cells_gast$alias, cells_embr$barcode),
+      study = c(rep("Gastruloid", nrow(cells_gast)),
+                rep("Embryo", nrow(cells_embr))),
+      clust_gastruloid = c(
+        as.character(cells_gast$clusters$cluster),
+        rep(NA, nrow(cells_embr))
+      ),
+      clust_embryo = c(
+        rep(NA, nrow(cells_gast)),
+        as.character(cells_embr$ann)
+      ),
+      clust_both = c(
+        as.character(cells_gast$clusters$cluster),
+        as.character(cells_embr$ann)
+      )
+    )
+    
+    exp <- SingleCellExperiment(
+      assay = SimpleList(counts = counts),
+      colData = cdata,
+      rowRanges = peaks
+    )
+    
+    saveRDS(exp, combined_file)
+    rm(counts, counts_embryo, counts_gastruloid, counts_timeseries,
+       reads)
+    
+  }
+  
+  exp <- readRDS(combined_file)
+  dimnames(exp) <- list(
+    rowRanges(exp)$name,
+    exp$alias
+  )
+  
+  
+}
+```
+
+### QC
+
+```{r}
+if (reconstruct) {
+  
+  not_ko <- !grepl("&KOs", exp$alias)
+  
+  library(TxDb.Mmusculus.UCSC.mm10.knownGene)
+  tss <- resize(genes(TxDb.Mmusculus.UCSC.mm10.knownGene), 1, "start")
+  tss <- resize(tss, 3000, fix = "center")
+  
+  keep_feats <- !overlapsAny(rowRanges(exp), tss)
+  
+  mat <- assay(exp, "counts", withDimnames = FALSE)
+  mat@x <- rep(1, length(mat@x))
+  
+  rmeans <- rowMeans(mat[, not_ko])
+  keep_feats <- keep_feats & rmeans > 0.015
+  
+  csums <- colSums(mat)
+  keep_cells <- csums >= 2000
+  
+  exp <- exp[keep_feats, keep_cells]
+} else {
+  exp <- readRDS(combined_file)
+}
+```
+
+## LSI
+
+### TF-IDF
+
+```{r}
+if (reconstruct) {
+  not_ko <- !grepl("&KOs", exp$alias)
+  
+  mat <- assay(exp, "counts")
+  mat@x <- rep(1, length(mat@x))
+  
+  tfidf <- tf_idf(mat[, not_ko])
+  idf   <- attr(tfidf, "idf")
+  
+  proj_tfidf <- tf_idf(mat[, !not_ko], idf = idf)
+}
+```
+
+### SVD
+
+```{r}
+if (reconstruct) {
+  center <- Matrix::rowMeans(tfidf)
+  scale  <- sparseMatrixStats::rowSds(tfidf)
+  
+  svd <- irlba::irlba(
+    t(tfidf),
+    nu = 100, nv = 100, work = 200,
+    center = center, scale = scale
+  )
+  
+  D <- diag(svd$d)
+  pca <- t(D %*% t(svd$u))
+  
+  varexp <- (svd$d^2) / sum(svd$d^2)
+}
+```
+
+### Project
+
+```{r}
+if (reconstruct) {
+  proj_tfidf <- as.matrix(proj_tfidf)
+  proj_tfidf <- sweep(proj_tfidf, 1, center, FUN = "-")
+  proj_tfidf <- sweep(proj_tfidf, 1, scale,  FUN = "/")
+  
+  proj_pca <- crossprod(svd$v, proj_tfidf)
+  proj_pca <- t(proj_pca)
+  
+  new_pca <- matrix(0, nrow = ncol(exp), ncol = ncol(pca))
+  new_pca[not_ko, ]  <- pca
+  new_pca[!not_ko, ] <- proj_pca
+  # pca <- rbind(pca, proj_pca)
+  pca <- as.matrix(new_pca)
+  
+  attr(pca, "varexp") <- varexp
+  dimnames(pca) <- list(
+    colnames(mat),
+    paste0("LSI", seq_len(ncol(pca)))
+  )
+  
+  reducedDim(exp, "LSI") <- pca
+}
+```
+
+### Plot
+
+```{r}
+o <- sample(1:ncol(exp))
+
+plot_comp <- function(i = 1, j = 2, dat) {
+  names <- colnames(dat)[c(i, j)]
+  df <- cbind(as.data.frame(dat[, c(i, j)]), study = exp$study)
+  
+  ggplot(df[o,], aes_string(names[1], names[2])) +
+    geom_point(aes(colour = study), size = 0.1) +
+    scale_colour_manual(
+      values = CYRUP[2:3],
+      guide = guide_legend(override.aes = list(size = 2))
+    ) +
+    labs(
+      x = paste0("LSI ", i, " (", scales::percent(varexp[i], 0.1), ")"),
+      y = paste0("LSI ", j, " (", scales::percent(varexp[j], 0.1), ")")
+    ) +
+    theme(aspect.ratio = NULL)
+}
+
+pca <- reducedDim(exp, "LSI")
+varexp <- attr(pca, "varexp")
+pc12 <- plot_comp(1, 2, pca)
+pc13 <- plot_comp(1, 3, pca)
+pc23 <- plot_comp(2, 3, pca)
+
+vexp <- ggplot(data.frame(x = seq_along(varexp), y = varexp),
+               aes(x, y)) +
+  geom_pointpath() +
+  scale_y_log10(labels = percent_format(1)) +
+  scale_x_continuous(limits = c(0, 50), na.value = Inf) +
+  labs(x = "LSI #", y = "") +
+  theme(aspect.ratio = NULL)
+
+(pc12 + pc13 + pc23 + vexp) + plot_layout(2, 2, guides = "collect")
+```
+
+### Batch correction
+
+```{r}
+if (reconstruct) {
+  batch <- exp$alias
+  batch <- tstrsplit(batch, "&")
+  batch <- ifelse(is.na(batch[[2]]), "Embryo", batch[[2]])
+  
+  cor_pca <- reducedMNN(
+    pca,
+    batch = factor(batch, levels = c("Embryo", "pilot", "timecourse", "timecourse2", "KOs")),
+    merge.order = c(1,4,5,3,2)
+  )
+  
+  reducedDim(exp, "LSI-cor") <- cor_pca$corrected
+}
+```
+
+## Embedding
+
+```{r}
+set.seed(20220419)
+pca <- reducedDim(exp, "LSI-cor")
+is_ko <- grepl("&KO", exp$alias)
+umap <- uwot::umap(pca[!is_ko, 2:50], ret_model = TRUE, init = "agspectral", metric = "cosine")
+trans <- uwot::umap_transform(pca[is_ko, 2:50], model = umap)
+
+new_umap <- matrix(0, nrow = ncol(exp), ncol = 2)
+new_umap[!is_ko, ] <- umap$embedding
+new_umap[is_ko,] <- trans
+umap <- new_umap
+
+
+df <- data.frame(
+  x = umap[, 1],
+  y = umap[, 2],
+  clust = exp$clust_both,
+  study = exp$study,
+  embryo = exp$clust_embryo,
+  gastruloid = exp$clust_gastruloid
+)
+
+o <- sample(1:nrow(df))
+
+ggplot(df[o,], aes(x, y)) +
+  geom_point(aes(colour = embryo), size = 0.5) +
+  stat_funxy(
+    geom = "text_repel",
+    funx = median, funy = median,
+    aes(label = gsub(" ", "\n", embryo), group = embryo),
+    size = 3
+  ) +
+  scale_x_continuous(breaks = NULL, name = "UMAP 1") +
+  scale_y_continuous(breaks = NULL, name = "UMAP 2") +
+  scale_colour_discrete(
+    guide = guide_legend(ncol = 2)
+  ) +
+  coord_equal() +
+  theme(aspect.ratio = NULL)
+```
+
+
+```{r}
+ggplot(df[o,], aes(x, y)) +
+  geom_point(aes(colour = gastruloid), size = 0.5) +
+  stat_funxy(
+    geom = "text_repel",
+    funx = median, funy = median,
+    aes(label = gsub(" ", "\n", gastruloid), group = gastruloid),
+    size = 3
+  ) +
+  scale_x_continuous(breaks = NULL, name = "UMAP 1") +
+  scale_y_continuous(breaks = NULL, name = "UMAP 2") +
+  scale_colour_discrete(
+    guide = guide_legend(ncol = 2)
+  ) +
+  coord_equal() +
+  theme(aspect.ratio = NULL)
+```
+
+## Save
+
+```{r}
+reducedDim(exp, "UMAP") <- umap
+saveRDS(exp, combined_file)
+
+```
+
+
+
+## References
+
+<div id="refs"></div>
+
+## Session Info
+
+```{r session_info, include=TRUE, echo=FALSE, results = "asis"}
+pkgs <- loadedNamespaces()
+libTvdB::format_sessioninfo_html(pkgs)
+```

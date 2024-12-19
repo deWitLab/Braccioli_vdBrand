@@ -1,0 +1,577 @@
+---
+title: "Motif Analysis"
+author: 
+  - name: "Teun van den Brand"
+    email: "t.vd.brand@nki.nl"
+    affiliation: "Netherlands Cancer Institute"
+date: '`r format(Sys.time(), "%d/%m/%Y")`'
+output: 
+  html_document:
+    theme: united
+    highlight: pygments
+    fig_caption: yes
+    code_folding: hide
+    df_print: kable
+    toc: true
+    toc_depth: 4
+    toc_float:
+      collapsed: false
+bibliography: /DATA/users/t.vd.brand/bibliography/articles.bibtex
+knit: |
+  # Redirect output to HTML folder
+  (function(inputFile, encoding) {
+    outputFile <- gsub("Rmd$", "html", basename(inputFile))
+    rmarkdown::render(
+      input = inputFile,
+      encoding = encoding,
+      output_file = here::here("html", outputFile)
+    )
+  })
+---
+
+## Setup {.tabset}
+
+<!-- little HTML script to do indentation of the table of contents -->
+<script>
+    $(document).ready(function() {
+      $items = $('div#TOC li');
+      $items.each(function(idx) {
+        num_ul = $(this).parentsUntil('#TOC').length;
+        $(this).css({'text-indent': num_ul * 10, 'padding-left': 0});
+      });
+
+    });
+</script>
+
+```{css, echo = FALSE}
+div.sourceCode {
+  overflow-x: hidden;
+}
+```
+
+### Load packages
+
+```{r stfu, include = FALSE}
+# No, I do *not* want your start-up messages, thank you very much
+library <- function(...) {
+  suppressPackageStartupMessages(base::library(...))
+}
+```
+
+
+```{r load_packages}
+library(here)
+library(ggplot2)
+library(scales)
+library(ggrepel)
+library(ggh4x)
+library(gt)
+library(patchwork)
+
+library(SingleCellExperiment)
+library(motifmatchr)
+library(JASPAR2020)
+library(BSgenome.Mmusculus.UCSC.mm10)
+library(chromVAR)
+library(TFBSTools)
+library(Matrix, exclude = "Matrix")
+```
+
+### Load data
+
+```{r load_data}
+exp_file   <- here("rds", "06_LSI_experiment.rds")
+stats_file <- here("rds", "06_peak_statistics.rds")
+
+exp   <- readRDS(exp_file)
+stats <- readRDS(stats_file)
+
+recompute <- !("motifs" %in% altExpNames(exp))
+```
+
+### Setup Aesthetics
+
+```{r setup_aes}
+mycolour <- "#000000FF" # Opaque Black
+
+theme_set(theme_gray())
+theme_update(text = element_text(colour = mycolour),
+             line = element_line(colour = mycolour),
+             aspect.ratio = 1,
+             axis.line  = element_line(colour = mycolour),
+             axis.ticks = element_line(colour = mycolour),
+             axis.text  = element_text(colour = mycolour),
+             legend.key = element_blank(),
+             legend.background = element_rect(colour = NA, fill = NA),
+             panel.background = element_blank(),
+             panel.grid.major = element_line(colour = "grey95"),
+             panel.grid.minor = element_blank(),
+             plot.background  = element_blank(),
+             strip.background = element_blank(),
+             strip.text = element_text(colour = mycolour))
+CYRUP <- c("#fed500", "#009bef", "#ff5c49", "#949494", "#D8D8D8")
+rm(mycolour)
+
+div_colours <- c("#0065b2", "#2399de", "#67cdfe", "#f5f5f5", "#fcb09d", 
+                 "#ed6855", "#be2a21")
+
+umap_coords <- list(
+  scale_x_continuous(name = "UMAP 1", breaks = NULL),
+  scale_y_continuous(name = "UMAP 2", breaks = NULL),
+  coord_equal(),
+  theme(aspect.ratio = NULL)
+)
+
+my_legend <- guide_legend(override.aes = list(size = 2, alpha = 1))
+```
+
+## Aim
+
+## Context
+
+```{r}
+umap <- reducedDim(exp, "UMAP")
+umap <- data.frame(
+  x = umap[, 1],
+  y = umap[, 2],
+  cluster = exp$clusters$cluster
+)
+clust_colour <- metadata(exp$clusters)$colours
+
+ggplot(umap, aes(x, y, colour = cluster)) +
+  geom_point(size = 0.5) +
+  scale_colour_manual(
+    values = clust_colour,
+    name   = "Cluster",
+    guide  = my_legend
+  ) +
+  umap_coords
+
+```
+
+## Setup peaks
+
+```{r}
+lrt_pval <- p.adjust(stats$lr_pval, "fdr") < 0.01
+choose   <- stats$ranges$index[lrt_pval]
+
+exp   <- exp[choose, ]
+peaks <- rowRanges(exp)
+```
+
+
+## Motif wrangling
+
+### Setup motifs
+
+```{r}
+opts_pfm <- list(tax_group = "vertebrates", collection = "CORE", matrixtype = "PFM")
+pfms <- getMatrixSet(JASPAR2020, opts_pfm)
+pfms <- c(pfms, getMatrixSet(JASPAR2020, list(ID = "UN0130.1", matrixtype = "PFM")))
+pwms <- toPWM(pfms, type = "prob")
+
+tags <- tags(pwms)
+fams <- lapply(tags, `[[`, i = "family")
+fams[lengths(fams) == 0] <- list("Unknown")
+fams[lengths(fams) > 1]  <- lapply(fams[lengths(fams) > 1], `[`, i = 1L)
+
+pwm_meta <- DataFrame(
+  id     = ID(pwms),
+  name   = name(pwms),
+  family = unlist(fams, FALSE, FALSE)
+)
+elementMetadata(pwms) <- pwm_meta
+```
+
+### Similarity
+
+```{r}
+set.seed(2022)
+i <- rep(seq_along(pwms), each = length(pwms))
+j <- rep(seq_along(pwms), length(pwms))
+
+motif_sim <- PWMSimilarity(pwms[i], pwms[j], method = "Pearson")
+dim(motif_sim) <- c(length(pwms), length(pwms))
+
+dist  <- 1 - motif_sim
+clust <- hclust(as.dist(dist), method = "ward.D2")
+
+motif_cut <- dynamicTreeCut::cutreeDynamic(clust, minClusterSize = 1,
+                                           distM = dist, deepSplit = 1)
+pwm_meta$clust <- motif_cut
+
+df <- data.frame(
+  i = i,
+  j = j,
+  sim = as.vector(motif_sim[clust$order, clust$order])
+)
+
+ggplot(df, aes(i, j, fill = sim)) +
+  geom_raster() +
+  scale_fill_gradientn(
+    colours = div_colours,
+    name = "Correlation",
+    rescaler = ~ rescale_mid(.x, mid = 0)
+  )
+```
+
+### Match motifs
+
+```{r}
+matches <- matchMotifs(
+  pwms, peaks, genome = BSgenome.Mmusculus.UCSC.mm10
+)
+```
+
+### Compute deviations
+
+```{r}
+if (recompute) {
+  exp  <- addGCBias(exp)
+  devi <- computeDeviations(exp, matches)
+  norm <- assay(devi, "z")
+} else {
+  devi <- altExp(exp, "motifs")
+  norm <- assay(devi, "zscore")
+}
+```
+
+## Trend
+
+### Mean-Variance
+
+```{r}
+df <- data.frame(
+  motif_id   = rownames(devi),
+  motif_name = rowData(devi)$name,
+  x = rowMeans(norm),
+  y = rowVars(norm)
+)
+
+fit <- MASS::rlm(y ~ poly(x, 1), data = df)
+df$fit <- predict(fit, newdata = df)
+df$resid <- resid(fit)
+
+large_resid <- head(sort(setNames(df$resid, df$motif_id), decreasing = TRUE), 12)
+df$dolabel  <- df$motif_id %in% names(large_resid)
+
+ggplot(df, aes(x, y)) +
+  geom_point(aes(colour = resid)) +
+  geom_line(aes(y = fit), colour = "black", linetype = 2) +
+  geom_text_repel(aes(label = ifelse(dolabel, motif_name, ""))) +
+  scale_colour_gradientn(
+    name     = "Residual",
+    colours  = div_colours,
+    rescaler = ~ rescale_mid(.x, mid = 0)
+  ) +
+  labs(x = "Average", y = "Variance") +
+  theme(aspect.ratio = 2/(1 + sqrt(5)))
+```
+
+### Examples
+
+```{r}
+mymotifs <- df$motif_id[df$dolabel]
+
+df <- lapply(seq_along(mymotifs), function(x) umap)
+df <- do.call(rbind, df)
+
+df$value <- as.vector(t(norm[mymotifs,]))
+
+mymotifs <- paste0(rowData(devi)[mymotifs, "name"], "\n", mymotifs)
+mymotifs <- factor(mymotifs, mymotifs)
+df$motif <- rep(mymotifs, each = nrow(umap))
+
+ratio <- diff(range(umap$y)) / diff(range(umap$x))
+
+ggplot(df, aes(x, y, colour = value)) +
+  geom_point(size = 0.1) +
+  umap_coords +
+  scale_colour_gradientn(
+    colours = div_colours,
+    rescaler = ~ rescale_mid(.x, mid = 0),
+    limits = c(-3, 3), oob = oob_squish
+  ) +
+  # GENOVA::scale_colour_GENOVA_div(
+  #   midpoint = 0, limits = qnorm(c(0.001, 0.999)), oob = oob_squish,
+  #   name = "Motif\nActivity"
+  # ) +
+  facet_wrap(~ motif) +
+  theme_void() +
+  theme(aspect.ratio = ratio,
+        strip.text = element_text(hjust = 0))
+```
+
+## Marker search
+
+```{r}
+cluster <- exp$clusters$cluster
+is_timeseries <- exp$batch != "KOs"
+
+markers <- scran::findMarkers(
+  norm[, is_timeseries], 
+  groups = cluster[is_timeseries], pval.type = "some",
+  row.data = pwm_meta
+)
+```
+
+### Volcano plots {.tabset}
+
+```{r}
+xlim <- lapply(markers, `[[`, i = "summary.logFC")
+xlim <- range(unlist(xlim))
+xlim <- c(-1, 1) * max(abs(xlim))
+
+ylim <- lapply(markers, `[[`, i = "FDR")
+ylim <- unlist(ylim)
+ylim <- range(ylim[ylim != 0])
+
+filter_rule <- function(data, n = 12) {
+  
+  id <- match(data$id, pwm_meta$id)
+  id <- pwm_meta$clust[id]
+  
+  # data <- data[order(data[[order]]), ]
+  # 
+  # minilab <- toupper(data[[label]])
+  # minilab <- gsub("\\(VAR.\\d\\)", "", minilab)
+  # minilab <- gsub("\\d", "", minilab)
+  # minilab <- gsub("OX\\w", "OX", minilab)
+
+  dup <- which(!duplicated(id))
+  
+  data[head(dup, n), ]
+}
+
+template <- ggplot(mapping = aes(summary.logFC, FDR)) +
+  geom_point() +
+  geom_text_repel(
+    data = ~ filter_rule(.x, n = 12),# "FDR", "name", n = 12),
+    aes(label = name), max.overlaps = 100
+  ) +
+  scale_y_continuous(
+    trans  = c("log10", "reverse"),
+    limits = c(1, 1e-300),
+    breaks = 10^seq(0, -300, by = -50),
+    labels = label_log(), expand = c(0, 0),
+    name   = "FDR P-value"
+  ) +
+  scale_x_continuous(
+    name   = "Summarised Log2 Fold Change",
+    limits = xlim
+  ) +
+  coord_axes_inside()
+
+volc_plots <- lapply(setNames(nm = names(markers)), function(i) {
+  template %+% as.data.frame(markers[[i]])
+})
+```
+
+
+```{r, results = 'asis', message = FALSE, warning=FALSE}
+for (i in names(volc_plots)) {
+  cat(paste0("\n\n#### Cluster", i, "\n"))
+  print(volc_plots[[i]])
+}
+```
+
+### Tables {.tabset}
+
+```{r}
+widths <- vapply(pwms, function(x) {ncol(Matrix(x))}, numeric(1))
+widths <- setNames(widths, pwm_meta$name)
+pfms  <- setNames(pfms, pwm_meta$name)
+id2name <- setNames(pwm_meta$id, pwm_meta$name)
+
+marker_table <- function(DF, clust = "Unspecified", top = 12) {
+  
+  DF$rank <- seq_len(nrow(DF))
+  DF <- filter_rule(DF, n = top)
+  
+  lfc_col <- startsWith(colnames(DF), "logFC")
+  lfc_avg <- rowMeans(as.matrix(DF[, lfc_col]))
+  lfc_avg <- number(lfc_avg, style_positive = "plus", accuracy = 0.01)
+  
+  maxwidth <- max(widths[DF$name])
+  mats <- Matrix(pfms[DF$name])
+  
+  logos <- suppressMessages(suppressWarnings(
+    lapply(mats, function(pfm) {
+      xlim <- 0.5 * ncol(pfm) + c(-0.5, 0.5) * maxwidth
+      ggseqlogo::ggseqlogo(pfm) +
+        scale_x_continuous(limits = xlim, guide = "none") +
+        scale_y_continuous(guide = "none") +
+        theme_void()
+    })
+  ))
+  
+  df <- data.frame(
+    Rank = DF$rank,
+    ID = id2name[DF$name],
+    Name = DF$name,
+    `FDR P-value` = DF$FDR,
+    `Average Difference` = lfc_avg,
+    Logo = NA
+  )
+  
+  tab <- gt(df) %>%
+    tab_header(
+      title = paste0("Marker motifs for cluster '", clust, "'.")
+    ) %>%
+    tab_spanner(
+      label = "Statistics",
+      columns = c("FDR.P.value", "Average.Difference")
+    ) %>%
+    text_transform(
+      locations = cells_body("Logo"),
+      fn = function(x) {
+        purrr::map(logos, ggplot_image, height = px(50), aspect_ratio = 4)
+      }
+    ) %>%
+    fmt_scientific(
+      columns = "FDR.P.value"
+    ) %>%
+    data_color(
+      Average.Difference, colors = function(x) {
+      str <- substr(x, 1, 1)
+      dplyr::case_when(
+        str == " " ~ "#999999",
+        str == "+" ~ "#4daf4a",
+        TRUE ~ "#e41a1c"
+      )
+    }, apply_to = "text") %>%
+    cols_align("left", "Name") %>%
+    cols_align("right", "Average.Difference") %>%
+    cols_label(
+      ID = "JASPAR ID",
+      FDR.P.value = "FDR P-value",
+      Average.Difference = html("Average<br>Difference")
+    ) %>%
+    cols_width(
+      FDR.P.value ~ px(150),
+      Logo ~ px(200),
+      everything() ~ px(100)
+    )
+  tab
+  
+}
+```
+
+```{r, results = 'asis', message = FALSE, warning=FALSE}
+for (i in names(markers)) {
+  cat(paste0("\n\n#### Cluster", i, "\n"))
+  print(marker_table(markers[[i]], i))
+}
+```
+
+### UMAPs {.tabset}
+
+```{r}
+plotmarkers <- function(DF, cluster, top = 12) {
+  
+  DF <- filter_rule(DF, n = top)
+  motifnames <- with(DF, paste0(id, "\n", name))
+  
+  ncells <- nrow(umap)
+  
+  df <- umap[rep(seq_len(ncells), top), ]
+  df$motifnames <- rep(motifnames, each = ncells)
+  df$motifnames <- factor(df$motifnames, levels = motifnames)
+  df$value <- as.vector(t(norm[DF$id, ]))
+  
+  ggplot(df, aes(x, y, colour = value)) +
+    geom_point(size = 0.1) +
+    umap_coords +
+    scale_colour_gradientn(
+      colours = div_colours,
+      rescaler = ~ rescale_mid(.x, mid = 0),
+      limits = c(-3, 3), oob = oob_squish
+    ) +
+    facet_wrap(~ motifnames) +
+    theme_void() +
+    theme(aspect.ratio = ratio,
+          strip.text = element_text(hjust = 0))
+}
+```
+
+```{r, results = 'asis', message = FALSE, warning=FALSE}
+for (i in names(markers)) {
+  cat(paste0("\n\n#### Cluster ", i, "\n"))
+  print(plotmarkers(markers[[i]], i))
+}
+```
+
+
+## Picked motifs {.tabset}
+
+```{r}
+pickmotifs <- c("SOX2", "Pou5f1::Sox2", "POU5F1", "ETV2", "CTCF", "CDX2", "MSGN1", 
+                "GATA6", "RFX4", "FOXC1", "TBXT", "TBX6", "TCF3", "TWIST1", "IRX3",
+                "FOXD2")
+
+rd <- rowData(devi)
+i  <- match(pickmotifs, rd$name)
+
+plts <- Map(
+  function(name, index) {
+    pwm <- pwms[[index]]
+    df <- cbind.data.frame(umap, motif = norm[index, ])
+    
+    p <- ggplot(df, aes(x, y, colour = motif)) +
+      geom_point(size = 0.5) +
+      umap_coords +
+      scale_colour_gradientn(
+        name = "Motif Z-score",
+        colours = div_colours,
+        rescaler = ~ rescale_mid(.x, mid = 0),
+        limits = c(-3, 3),
+        oob = oob_squish
+      )
+    
+    logo <- suppressWarnings(
+      ggseqlogo::ggseqlogo(Matrix(pwm)) +
+        theme(aspect.ratio = 2/(1 + sqrt(5)))
+    )
+    
+    (p / logo) +
+      plot_layout(nrow = 2, guides = "collect")
+    
+  },
+  index = i,
+  name  = pickmotifs
+)
+plts <- setNames(plts, pickmotifs)
+```
+
+```{r, results = 'asis', message = FALSE, warning=FALSE}
+for (i in pickmotifs) {
+  cat(paste0("\n\n### ", i, "\n"))
+  print(plts[[i]])
+}
+```
+
+## Save
+
+```{r}
+if (recompute) {
+  motif_exp <- SingleCellExperiment(
+    assays  = SimpleList(zscore = assay(devi, "z")),
+    rowData = cbind(pwm_meta, rowData(devi)[, -1])
+  )
+  exp <- readRDS(exp_file)
+  altExp(exp, "motifs") <- motif_exp
+  saveRDS(exp, exp_file)
+}
+```
+
+## References
+
+<div id="refs"></div>
+
+## Session Info
+
+```{r session_info, include=TRUE, echo=FALSE, results = "asis"}
+pkgs <- loadedNamespaces()
+libTvdB::format_sessioninfo_html(pkgs)
+```
+

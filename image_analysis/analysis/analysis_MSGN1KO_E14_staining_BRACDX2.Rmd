@@ -1,0 +1,296 @@
+
+
+### Libraries
+
+```{r, results = 'hide', warning = FALSE, message = FALSE}
+library(ggplot2)
+library(data.table)
+library(stringr)
+library(dplyr)
+```
+
+
+## Importing results
+## NOTE: BRA = TBXT
+```{r}
+results <- list.files(path = "../Analysis CDX2_BRA mean intensity/", recursive = TRUE, pattern = ".csv$", full.names = TRUE)
+
+values_example <- read.csv(results[3], sep = ",",  header = T)
+
+data <- lapply(results, read.csv, sep = ",")
+
+str <-  str_remove(results, ".csv")
+
+str_names <- tstrsplit(str, c("/"))
+
+data_labeled <- mapply(cbind, data, "Line"= str_names[[4]], "Replicate"= str_names[[5]], SIMPLIFY=F)
+
+df <- bind_rows(data_labeled)
+
+df[is.na(df)] <- 0  
+
+df$Line <- factor(
+  df$Line,
+  levels = c("E14", "3-7", "4-5", "E14+3-7", "E14+4-5")
+)
+
+df <- df %>%
+  mutate(
+  area_label = tstrsplit(Label, ":")[[2]] %>% substr(start = 1, stop = nchar(.) - 2)
+  )
+
+```
+
+
+
+## Analysis for channel 1 - CDX2
+```{r}
+####channel 1 - CDX2
+
+channel_name <- c("1")
+
+staining_name <- c("Total_area_slice")
+
+df_channel <-  filter(df, Ch == channel_name)
+
+df_channel_CDX2 <- filter(df_channel, grepl(staining_name, area_label))
+
+df_channel_CDX2_rep1 <- filter(df_channel_CDX2, Replicate == "REP1")
+
+df_channel_CDX2_rep2 <- filter(df_channel_CDX2, Replicate == "REP2")
+
+
+E14_rep1 <- df_channel_CDX2_rep1 %>% filter(Line == "E14")
+
+E14_rep1_mean <- mean(E14_rep1$Mean)
+
+E14_rep2 <- df_channel_CDX2_rep2 %>% filter(Line == "E14")
+
+E14_rep2_mean <- mean(E14_rep2$Mean)
+
+
+df_channel_CDX2_rep1_norm <- df_channel_CDX2_rep1 %>% mutate(Norm_Mean = df_channel_CDX2_rep1$Mean/E14_rep1_mean)
+
+df_channel_CDX2_rep2_norm <- df_channel_CDX2_rep2 %>% mutate(Norm_Mean = df_channel_CDX2_rep2$Mean/E14_rep2_mean)
+
+norm_df_df_channel_CDX2 <- rbind(df_channel_CDX2_rep1_norm, df_channel_CDX2_rep2_norm)
+
+
+```
+
+## Analysis for channel 2 - BRA
+
+```{r}
+####channel 2 - BRA 
+
+
+channel_name <- c("2")
+
+staining_name <- c("Total_area_slice")
+
+df_channel <-  filter(df, Ch == channel_name)
+
+df_channel_BRA <- filter(df_channel, grepl(staining_name, area_label))
+
+df_channel_BRA_rep1 <- filter(df_channel_BRA, Replicate == "REP1")
+
+df_channel_BRA_rep2 <- filter(df_channel_BRA, Replicate == "REP2")
+
+E14_rep1 <- df_channel_BRA_rep1 %>% filter(Line == "E14")
+
+E14_rep1_mean <- mean(E14_rep1$Mean)
+
+E14_rep2 <- df_channel_BRA_rep2 %>% filter(Line == "E14")
+
+E14_rep2_mean <- mean(E14_rep2$Mean)
+
+df_channel_BRA_rep1_norm <- df_channel_BRA_rep1 %>% mutate(Norm_Mean = df_channel_BRA_rep1$Mean/E14_rep1_mean)
+
+df_channel_BRA_rep2_norm <- df_channel_BRA_rep2 %>% mutate(Norm_Mean = df_channel_BRA_rep2$Mean/E14_rep2_mean)
+
+norm_df_df_channel_BRA <- rbind(df_channel_BRA_rep1_norm, df_channel_BRA_rep2_norm)
+
+
+```
+
+
+## Plotting function
+
+```{r}
+
+plot_fun <- function(data, var, label_nudge = 5e4) {
+  yrange <- diff(range(rlang::eval_tidy(enquo(var), data)))
+
+  ggplot(data, aes(x = 
+                     Line, y = {{var}}, fill = Line,
+                   colour = after_scale(colorspace::darken(fill, 0.4)))) +
+    gghalves::geom_half_boxplot(
+      outlier.shape = NA, width = 0.5,
+      position = position_nudge(x = -0.1)
+    ) +
+    ggbeeswarm::geom_beeswarm(
+      aes(shape = Replicate),
+      side = 1, size = 1, cex = 3
+    ) +
+    stat_summary(
+      aes(label = after_stat(paste0("n = ", ymax)),
+          y = stage({{var}}, after_stat = ymin)),
+      fun.max = length, fun.min = max,
+      geom = "text", position = position_nudge(y = yrange * 0.1)
+    ) +
+  scale_y_continuous(
+  limits = c(0, 10), expand = c(0, 0, 0.1, 0)
+    ) +
+    scale_fill_brewer(
+      palette = "Set1",
+      guide  = "none"
+    ) +
+    scale_shape_manual(
+      values = 21:25,
+      guide  = "none"
+    ) +
+    theme(
+      panel.grid.minor = element_blank()
+    )
+}
+
+```
+
+# Plotting area and mean intensity CDX2
+
+```{r}
+p1 <- plot_fun(df_channel_CDX2, Mean) +
+  labs(x = "Line", y = "CDX2 norm. mean intensity Rep.1")
+
+
+p2 <- plot_fun(df_channel_CDX2_rep2_norm, Mean) +
+  labs(x = "Line", y = "CDX2 norm. mean intensity Rep.2")
+
+p <- plot_fun(norm_df_df_channel_CDX2, Norm_Mean) +
+  labs(x = "Line", y = "CDX2 mean intensity")
+
+
+print(p1)
+print(p2)
+print(p3)
+```
+
+
+# Plotting area and mean intensity BRA
+
+```{r}
+p1 <- plot_fun(df_channel_BRA, Mean) +
+  labs(x = "Line", y = "BRA mean intensity") +
+ facet_wrap(~Replicate) 
+
+
+p2 <- plot_fun(df_channel_BRA, IntDen) +
+  labs(x = "Line", y = "BRA int dens") +
+  facet_wrap(~Replicate)
+
+p3 <- plot_fun(norm_df_df_channel_BRA, Norm_Mean) +
+  labs(x = "Line", y = "BRA mean intensity")
+
+print(p1)
+print(p2)
+print(p3)
+
+```
+
+# Stats BRA
+
+```{r}
+
+E14 <- norm_df_df_channel_BRA %>% filter(Line == "E14")
+
+C3_7 <- norm_df_df_channel_BRA %>% filter(Line == "3-7")
+
+C4_5 <- norm_df_df_channel_BRA %>% filter(Line == "4-5")
+
+E14_C3_7 <- norm_df_df_channel_BRA %>% filter(Line == "E14+3-7")
+
+E14_C4_5 <- norm_df_df_channel_BRA %>% filter(Line == "E14+4-5")
+
+mean_C3_7 <- C3_7 %>% group_by(Replicate) %>% summarize(mean(Norm_Mean))
+
+mean_C4_5 <- C4_5 %>% group_by(Replicate) %>% summarize(mean(Norm_Mean))
+
+mean_E14_C3_7 <- C3_7 %>% group_by(Replicate) %>% summarize(mean(Norm_Mean))
+
+mean_E14_C4_5 <- C4_5 %>% group_by(Replicate) %>% summarize(mean(Norm_Mean))
+
+wilcox.test(E14$Norm_Mean, C3_7$Norm_Mean)
+
+wilcox.test(E14$Norm_Mean, C4_5$Norm_Mean)
+
+wilcox.test(C3_7$Norm_Mean, E14_C3_7$Norm_Mean)
+
+wilcox.test(C4_5$Norm_Mean, E14_C4_5$Norm_Mean)
+
+wilcox.test(E14$Norm_Mean, E14_C3_7$Norm_Mean)
+
+wilcox.test(E14$Norm_Mean, E14_C4_5$Norm_Mean)
+
+```
+
+
+
+## Plotting Teun's stile (add p <- next to the plot you want to print first and change file label below)
+``` {R}
+# Before plotting ---------------------------------------------------------
+
+mycolour <- "#000000FF"
+
+# Geom defaults
+text_defaults <- list(family = "Roboto", size = 6 / .pt, colour = mycolour)
+ggplot2::update_geom_defaults("text",  text_defaults)
+ggplot2::update_geom_defaults("label", text_defaults)
+
+# Theme defaults
+ggplot2::theme_set(ggplot2::theme_gray())
+ggplot2::theme_update(
+  text              = ggplot2::element_text(colour = mycolour, size = 8,
+                                            family = "Roboto"),
+  line              = ggplot2::element_line(colour = mycolour),
+  aspect.ratio      = 1,
+  axis.line         = ggplot2::element_line(colour = mycolour, lineend = "square"),
+  axis.ticks        = ggplot2::element_line(colour = mycolour),
+  axis.text         = ggplot2::element_text(colour = mycolour, size = 6),
+  legend.title      = ggplot2::element_text(colour = mycolour, size = 6),
+  legend.text       = ggplot2::element_text(colour = mycolour, size = 6),
+  legend.key        = ggplot2::element_blank(),
+  legend.background = ggplot2::element_rect(colour = NA, fill = NA),
+  panel.background  = ggplot2::element_blank(),
+  panel.grid.major  = ggplot2::element_line(colour = "grey95", size = 0.25),
+  panel.grid.minor  = ggplot2::element_blank(),
+  plot.background   = ggplot2::element_blank(),
+  strip.background  = ggplot2::element_blank(),
+  strip.text        = ggplot2::element_text(colour = mycolour, size = 8)
+)
+
+# After plotting ----------------------------------------------------------
+
+# Dimensions of the panel, not entire plotting area. If using facets, change
+# for every panel along dimension. E.g. two left-to-right panels should be
+# panel_width_cm <- c(4, 4)
+panel_width_cm  <- 4
+panel_height_cm <- 4
+
+p <- p + ggh4x::force_panelsizes(
+  rows = unit(panel_height_cm, "cm"), 
+  cols = unit(panel_width_cm, "cm")
+)
+
+ggsave(
+  "MSGN1KO_CDX2_mean.svg", # <- change this
+  plot   = p, 
+  device = svglite::svglite, 
+  width  = sum(panel_width_cm) * 2,
+  height = sum(panel_height_cm) * 2,
+  unit   = "cm",
+  fix_text_size = FALSE
+)
+
+
+
+```

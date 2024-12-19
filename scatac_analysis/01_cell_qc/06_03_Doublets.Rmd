@@ -1,0 +1,190 @@
+---
+title: "Find Doublets"
+author: 
+  - name: "Teun van den Brand"
+    email: "t.vd.brand@nki.nl"
+    affiliation: "Netherlands Cancer Institute"
+date: '`r format(Sys.time(), "%d/%m/%Y")`'
+output: 
+  html_document:
+    theme: united
+    highlight: pygments
+    fig_caption: yes
+    code_folding: hide
+    df_print: kable
+    toc: true
+    toc_depth: 4
+    toc_float:
+      collapsed: false
+bibliography: /DATA/users/t.vd.brand/bibliography/articles.bibtex
+knit: |
+  # Redirect output to HTML folder
+  (function(inputFile, encoding) {
+    outputFile <- gsub("Rmd$", "html", basename(inputFile))
+    rmarkdown::render(
+      input = inputFile,
+      encoding = encoding,
+      output_file = here::here("html", outputFile)
+    )
+  })
+---
+
+## Setup {.tabset}
+
+<!-- little HTML script to do indentation of the table of contents -->
+<script>
+    $(document).ready(function() {
+      $items = $('div#TOC li');
+      $items.each(function(idx) {
+        num_ul = $(this).parentsUntil('#TOC').length;
+        $(this).css({'text-indent': num_ul * 10, 'padding-left': 0});
+      });
+
+    });
+</script>
+
+```{css, echo = FALSE}
+div.sourceCode {
+  overflow-x: hidden;
+}
+```
+
+### Load packages
+
+```{r stfu, include = FALSE}
+# No, I do *not* want your start-up messages, thank you very much
+library <- function(...) {
+  suppressPackageStartupMessages(base::library(...))
+}
+```
+
+
+```{r load_packages}
+# Install dev version
+# BiocManager::install("plger/scDblFinder") # v1.9.10
+
+library(SingleCellExperiment)
+library(scDblFinder)
+library(Matrix)
+library(BiocParallel)
+
+library(here)
+library(ggplot2)
+```
+
+### Load data
+
+```{r load_data}
+timeseries <- readRDS(here("rds", "04_binary_experiment.rds"))
+knockouts  <- readRDS(here("rds", "05_binary_experiment_KOs.rds"))
+```
+
+### Setup Aesthetics
+
+```{r setup_aes}
+mycolour <- "#000000FF" # Opaque Black
+
+theme_set(theme_gray())
+theme_update(text = element_text(colour = mycolour),
+             line = element_line(colour = mycolour),
+             aspect.ratio = 1,
+             axis.line  = element_line(colour = mycolour),
+             axis.ticks = element_line(colour = mycolour),
+             axis.text  = element_text(colour = mycolour),
+             legend.key = element_blank(),
+             legend.background = element_rect(colour = NA, fill = NA),
+             panel.background = element_blank(),
+             panel.grid.major = element_line(colour = "grey95"),
+             panel.grid.minor = element_blank(),
+             plot.background  = element_blank(),
+             strip.background = element_blank(),
+             strip.text = element_text(colour = mycolour))
+CYRUP <- c("#fed500", "#009bef", "#ff5c49", "#949494", "#D8D8D8")
+rm(mycolour)
+```
+
+## Aim
+
+Combine data from the timeseries and the knockout experiment, then find doublets.
+
+## Combine data
+
+```{r}
+columns  <- intersect(
+  colnames(colData(timeseries)),
+  colnames(colData(knockouts))
+)
+metadata <- rbind(
+  colData(timeseries)[, columns],
+  colData(knockouts)[, columns]
+)
+
+counts <- cbind(
+  assay(timeseries, "binary"),
+  assay(knockouts, "binary")
+)
+
+exp <- SingleCellExperiment(
+  assays    = SimpleList(counts = counts),
+  rowRanges = rowRanges(timeseries),
+  colData   = metadata
+)
+```
+
+## Find doublets
+
+### Run function
+
+```{r, results = 'hold'}
+set.seed(20220412)
+
+doublets <- scDblFinder(
+  exp,
+  # Recommended settings for scATACseq data
+  aggregateFeatures = TRUE, nfeatures = 25,
+  processing = "normFeatures"
+)
+```
+
+```{r}
+doublets <- colData(doublets)
+doublets <- doublets[, grepl("scDblFinder", colnames(doublets))]
+colnames(doublets) <- gsub("scDblFinder.", "", colnames(doublets))
+
+df <- as.data.frame(doublets)
+df$sample <- exp$sample
+df$batch  <- exp$batch
+
+ggplot(df, aes(score, sample, colour = class)) +
+  ggbeeswarm::geom_quasirandom(groupOnX = FALSE, size = 0.1) +
+  scale_colour_manual(
+    values = CYRUP[2:3],
+    guide  = guide_legend(override.aes = list(size = 2))
+  ) +
+  scale_x_continuous(
+    name   = "Doublet Score",
+    trans  = "logit",
+    breaks = c(0.001, 0.01, 0.1, 0.5, 0.9, 0.99, 0.999),
+    labels = c("0.001", "0.01", "0.1", "0.5", "0.9", "0.99", "0.999")
+  ) +
+  facet_grid(batch ~ ., scales = "free_y", space = "free_y") +
+  theme(aspect.ratio = NULL)
+```
+
+```{r}
+exp$doublets <- doublets
+
+saveRDS(exp, here("rds", "06_binary_experiment_combined.rds"))
+```
+
+
+## References
+
+<div id="refs"></div>
+
+## Session Info
+
+```{r session_info, include=TRUE, echo=FALSE, results = "asis"}
+pkgs <- loadedNamespaces()
+libTvdB::format_sessioninfo_html(pkgs)
+```

@@ -1,0 +1,442 @@
+---
+title: "Diffusion Pseudotime"
+author: 
+  - name: "Teun van den Brand"
+    email: "t.vd.brand@nki.nl"
+    affiliation: "Netherlands Cancer Institute"
+date: '`r format(Sys.time(), "%d/%m/%Y")`'
+output: 
+  html_document:
+    theme: united
+    highlight: pygments
+    fig_caption: yes
+    code_folding: hide
+    df_print: kable
+    toc: true
+    toc_depth: 4
+    toc_float:
+      collapsed: false
+bibliography: /DATA/users/t.vd.brand/bibliography/articles.bibtex
+knit: |
+  # Redirect output to HTML folder
+  (function(inputFile, encoding) {
+    outputFile <- gsub("Rmd$", "html", basename(inputFile))
+    rmarkdown::render(
+      input = inputFile,
+      encoding = encoding,
+      output_file = here::here("html", outputFile)
+    )
+  })
+---
+
+## Setup {.tabset}
+
+<!-- little HTML script to do indentation of the table of contents -->
+<script>
+    $(document).ready(function() {
+      $items = $('div#TOC li');
+      $items.each(function(idx) {
+        num_ul = $(this).parentsUntil('#TOC').length;
+        $(this).css({'text-indent': num_ul * 10, 'padding-left': 0});
+      });
+
+    });
+</script>
+
+```{css, echo = FALSE}
+div.sourceCode {
+  overflow-x: hidden;
+}
+```
+
+### Load packages
+
+```{r stfu, include = FALSE}
+# No, I do *not* want your start-up messages, thank you very much
+library <- function(...) {
+  suppressPackageStartupMessages(base::library(...))
+}
+```
+
+
+```{r load_packages}
+library(destiny)
+library(SingleCellExperiment)
+library(Biostrings)
+
+library(here)
+library(ggplot2)
+library(scales)
+library(ggh4x)
+```
+
+### Load data
+
+```{r load_data}
+exp_file <- here("rds", "06_LSI_experiment.rds")
+exp <- readRDS(exp_file)
+```
+
+### Setup Aesthetics
+
+```{r setup_aes}
+mycolour <- "#000000FF" # Opaque Black
+
+theme_set(theme_gray())
+theme_update(text = element_text(colour = mycolour),
+             line = element_line(colour = mycolour),
+             aspect.ratio = 1,
+             axis.line  = element_line(colour = mycolour),
+             axis.ticks = element_line(colour = mycolour),
+             axis.text  = element_text(colour = mycolour),
+             legend.key = element_blank(),
+             legend.background = element_rect(colour = NA, fill = NA),
+             panel.background = element_blank(),
+             panel.grid.major = element_line(colour = "grey95"),
+             panel.grid.minor = element_blank(),
+             plot.background  = element_blank(),
+             strip.background = element_blank(),
+             strip.text = element_text(colour = mycolour))
+CYRUP <- c("#fed500", "#009bef", "#ff5c49", "#949494", "#D8D8D8")
+rm(mycolour)
+
+umap_xy_scales <- function(name = "UMAP", breaks = NULL, ...) {
+  list(
+    scale_x_continuous(paste(name, 1), breaks = breaks, ...),
+    scale_y_continuous(paste(name, 2), breaks = breaks, ...),
+    coord_equal(),
+    theme(aspect.ratio = NULL)
+  )
+}
+
+cluster_colours <- metadata(exp$clusters)$colour
+my_legend <- guide_legend(override.aes = list(size = 2, alpha = 1))
+
+scale_colour_cluster <- function(
+  name = "Clusters",
+  guide = my_legend,
+  values = cluster_colours,
+  ...
+) {
+  scale_colour_manual(
+    values = values,
+    guide = guide,
+    name = name,
+    ...
+  )
+}
+
+div_colours <- c("#0065b2", "#2399de", "#67cdfe", "#f5f5f5", "#fcb09d", "#ed6855", 
+"#be2a21")
+```
+
+## Aim
+
+We want to know pseudotime. We'll use the **{destiny}** package to make diffusion maps, from which a *diffusion pseudotime* can be calculated based on the transition probabilities.
+
+We first calculate the diffusion maps on suitable cells, and afterwards we'll go through some effort to also estimate the parameters for cells we deemed unsuitable for constructing the diffusion map.
+
+## Context
+
+```{r}
+umap <- reducedDim(exp, "UMAP")
+umap <- data.frame(
+  x = umap[, 1],
+  y = umap[, 2],
+  sample = exp$clusters$cluster
+)
+
+ggplot(umap, aes(x, y, colour = sample)) +
+  geom_point(size = 0.5) +
+  umap_xy_scales() +
+  scale_colour_cluster()
+```
+
+## Filter
+
+For now, we filter out the knockout data and cluster G. We'll fill these back in later.
+
+```{r}
+pca <- reducedDim(exp, "LSI-integrated-corrected")
+pca <- pca[, 2:50]
+
+is_timeseries <- exp$batch != "KOs"
+is_clustgh    <- exp$clusters$cluster %in% c("G", "H")
+keep_cells    <- is_timeseries & !is_clustgh
+
+pca <- pca[keep_cells, ]
+```
+
+
+## Diffusion maps
+
+```{r}
+set.seed(20220415)
+difmap <- DiffusionMap(pca, distance = "cosine")
+```
+
+### First two components
+
+```{r}
+df <- data.frame(
+  x = difmap$DC1,
+  y = difmap$DC2,
+  clust = exp$clusters$cluster[keep_cells]
+)
+
+ggplot(df, aes(x, y, colour = clust)) +
+  geom_point(size = 0.5) +
+  scale_colour_cluster() +
+  labs(x = "DC1", y = "DC2") +
+  coord_axes_inside(ratio = 1) +
+  theme(aspect.ratio = NULL)
+```
+
+### Eigenvalues
+
+```{r}
+eigs <- difmap@eigenvalues
+eigs <- data.frame(
+  num = seq_along(eigs),
+  val = eigs
+)
+
+largest_drop <- which.min(diff(eigs$val)) + c(0, 1)
+
+ggplot(eigs, aes(num, val)) +
+  geom_line() +
+  geom_point() +
+  geom_line(colour = "dodgerblue", data = eigs[largest_drop,]) +
+  labs(x = "Diffusion Component", y = "Eigenvalue")
+```
+
+### Grid
+
+```{r}
+grid <- expand.grid(1:6, 1:6)
+
+grid <- apply(grid, 1, function(i) {
+  data.frame(
+    xnum = paste0("DC", i[[1]]),
+    ynum = paste0("DC", i[[2]]),
+    x = difmap@eigenvectors[, i[[1]]],
+    y = difmap@eigenvectors[, i[[2]]],
+    col = exp$clusters$cluster[keep_cells]
+  )
+})
+
+grid <- do.call(rbind, grid)
+
+ggplot(grid, aes(x, y, colour = col)) +
+  geom_point(size = 0.1) +
+  scale_colour_cluster() +
+  labs(x = NULL, y = NULL) +
+  facet_grid(ynum ~ xnum, scales = "free") +
+  coord_axes_inside()
+```
+
+### UMAPs
+
+```{r}
+df <- data.frame(
+  x = rep(umap$x[keep_cells], 12),
+  y = rep(umap$y[keep_cells], 12),
+  value = as.vector(difmap@eigenvectors[, 1:12]),
+  dc = factor(paste0("DC", rep(1:12, each = sum(keep_cells))),
+              paste0("DC", 1:12))
+)
+
+ggplot(df, aes(x, y, colour = value)) +
+  geom_point(size = 0.1) +
+  scale_colour_gradientn(
+    colours = div_colours,
+    rescaler = ~ rescale_mid(.x, mid = 0)
+  ) +
+  facet_wrap(~ dc) +
+  umap_xy_scales()
+
+```
+
+## Branching
+
+```{r}
+tips <- c(
+ "Prog" = which.min(difmap@eigenvectors[, 3]),
+ "NT"   = which.max(difmap@eigenvectors[, 2]),
+ "MD"   = which.min(difmap@eigenvectors[, 1])
+)
+
+dpt <- DPT(difmap, tips = tips, w_width = 1)
+
+df <- data.frame(
+  x = difmap$DC1,
+  y = difmap$DC2,
+  branch = dpt@branch[, 1],
+  tips   = dpt@tips[, 1]
+)
+
+ggplot(df, aes(x, y, colour = factor(branch))) +
+  geom_point(size = 0.5) +
+  geom_point(data = ~  subset(.x, tips),
+             size = 5, shape = 21, colour = "black") +
+  coord_axes_inside() +
+  guides(colour = my_legend) +
+  labs(x = "DC1", y = "DC2", colour = "Branch")
+```
+
+```{r}
+df <- data.frame(
+  x = umap$x[keep_cells],
+  y = umap$y[keep_cells],
+  branch = dpt@branch[, 1],
+  tips   = dpt@tips[, 1]
+)
+
+ggplot(df, aes(x, y, colour = factor(branch))) +
+  geom_point(size = 0.5) +
+  geom_point(data = ~  subset(.x, tips),
+             size = 5, shape = 21, colour = "black") +
+  umap_xy_scales() +
+  guides(colour = my_legend) +
+  labs(colour = "Branch")
+```
+
+## Pseudotime
+
+```{r}
+df$dpt <- destiny:::dpt_for_branch(dpt, 1)
+
+ggplot(df, aes(x, y, colour = dpt)) +
+  geom_point(size = 0.5) +
+  colorspace::scale_color_continuous_sequential(
+    palette = "PuRd", name = "Pseudotime"
+  ) +
+  umap_xy_scales()
+```
+
+## Predict omitted
+
+Because we've excluded some cells from participating in the diffusion mapping, notably cluster H and the knockout data, we'll use prediction methods to predict their diffusion coordinates, and from that fit a model to predict the pseudotime.
+
+### Diffusion Map
+
+Luckily, **{destiny}** provides us with a `dm_predict()` function to do exactly this.
+
+```{r}
+pca_omit <- reducedDim(exp, "LSI-integrated-corrected")
+pca_omit <- pca_omit[!keep_cells, 2:50]
+
+dm_omit <- dm_predict(difmap, pca_omit)
+
+new_diffusion <- matrix(
+  NA, 
+  nrow = ncol(exp),
+  ncol = ncol(difmap@eigenvectors)
+)
+
+new_diffusion[keep_cells, ]  <- difmap@eigenvectors
+new_diffusion[!keep_cells, ] <- as.matrix(dm_omit)
+colnames(new_diffusion) <- paste0("DC", seq_len(ncol(new_diffusion)))
+```
+
+### Pseudotime
+
+To calculate pseudotime positions for cells that weren't in the original diffusion map, we'll use a straightforward linear model to predict the pseudotime with all the diffusion components, which should be roughly *accurate enough*.
+
+```{r}
+DPT <- cbind(
+  "DPT1" = destiny:::dpt_for_branch(dpt, 1),
+  "DPT2" = destiny:::dpt_for_branch(dpt, 2),
+  "DPT3" = destiny:::dpt_for_branch(dpt, 3)
+)
+
+new_dpt <- matrix(
+  NA,
+  nrow = ncol(exp),
+  ncol = ncol(DPT)
+)
+
+new_dpt[keep_cells, ] <- DPT
+
+new_data <- as.data.frame(new_diffusion[!keep_cells, ])
+
+# Fit DPT1
+data <- cbind.data.frame(dpt = DPT[, 1], difmap@eigenvectors)
+fit <- lm(dpt ~ ., data = data)
+new_dpt[!keep_cells, 1] <- predict(fit, newdata = new_data)
+
+# Fit DPT2
+data <- cbind.data.frame(dpt = DPT[, 2], difmap@eigenvectors)
+fit <- lm(dpt ~ ., data = data)
+new_dpt[!keep_cells, 2] <- predict(fit, newdata = new_data)
+
+# Fit DPT3
+data <- cbind.data.frame(dpt = DPT[, 3], difmap@eigenvectors)
+fit <- lm(dpt ~ ., data = data)
+new_dpt[!keep_cells, 3] <- predict(fit, newdata = new_data)
+```
+
+### Show predicted
+
+#### DC1-DC32
+
+```{r}
+df <- data.frame(
+  x = new_diffusion[, 1],
+  y = new_diffusion[, 2],
+  clust = exp$clusters$cluster
+)
+
+ggplot(df, aes(x, y, colour = clust)) +
+  geom_point(size = 0.5) +
+  coord_axes_inside(ratio = 1) +
+  scale_colour_cluster() +
+  labs(x = "DC1", y = "DC2") +
+  theme(aspect.ratio = NULL)
+```
+
+#### Pseudotime
+
+```{r}
+df <- data.frame(
+  x = umap$x,
+  y = umap$y,
+  dpt = new_dpt[, 1]
+)
+
+ggplot(df, aes(x, y, colour = dpt)) +
+  geom_point(size = 0.5) +
+  colorspace::scale_color_continuous_sequential(
+    palette = "PuRd", name = "Pseudotime"
+  ) +
+  umap_xy_scales()
+```
+
+## Save diffusion map
+
+```{r}
+reducedDim(exp, "diffusion_map") <- new_diffusion
+
+exp$diffusion <- DataFrame(
+  dpt1 = new_dpt[, 1],
+  dpt2 = new_dpt[, 2],
+  dpt3 = new_dpt[, 3],
+  branch = NA,
+  tips   = NA
+)
+exp$diffusion$branch[keep_cells] <- dpt@branch[, 1]
+exp$diffusion$tips[keep_cells]   <- dpt@tips[, 1]
+
+saveRDS(exp, exp_file)
+```
+
+## References
+
+<div id="refs"></div>
+
+## Session Info
+
+```{r session_info, include=TRUE, echo=FALSE, results = "asis"}
+pkgs <- loadedNamespaces()
+libTvdB::format_sessioninfo_html(pkgs)
+```
