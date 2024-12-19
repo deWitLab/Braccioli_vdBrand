@@ -1,0 +1,435 @@
+---
+title: "scRNAseq Veenvliet 2020"
+author: 
+  - name: "Teun van den Brand"
+    email: "t.vd.brand@nki.nl"
+    affiliation: "Netherlands Cancer Institute"
+date: '`r format(Sys.time(), "%d/%m/%Y")`'
+output: 
+  html_document:
+    theme: united
+    highlight: pygments
+    fig_caption: yes
+    code_folding: hide
+    df_print: kable
+    toc: true
+    toc_depth: 4
+    toc_float:
+      collapsed: false
+bibliography: /DATA/users/t.vd.brand/bibliography/articles.bibtex
+---
+
+## Setup {.tabset}
+
+<!-- little HTML script to do indentation of the table of contents -->
+<script>
+    $(document).ready(function() {
+      $items = $('div#TOC li');
+      $items.each(function(idx) {
+        num_ul = $(this).parentsUntil('#TOC').length;
+        $(this).css({'text-indent': num_ul * 10, 'padding-left': 0});
+      });
+
+    });
+</script>
+
+```{css, echo = FALSE}
+div.sourceCode {
+  overflow-x: hidden;
+}
+```
+
+### Load packages
+
+```{r load_packages, results = 'hide', warning = FALSE, message = FALSE}
+library(SingleCellExperiment)
+library(here)
+library(ggplot2)
+library(scales)
+library(scran)
+library(scater)
+library(batchelor)
+library(EnsDb.Mmusculus.v79)
+library(BiocSingular)
+library(ggh4x)
+library(patchwork)
+```
+
+### Load data
+
+```{r load_data}
+exp <- readRDS(here("rds", "XX_veenvliet2020_sce.rds"))
+metadata <- data.table::fread("../data_raw/external/veenvliet2020/TLS_meta_data.tsv")
+
+bc_exp <- exp$barcodes
+bc_exp <- exp$barcodes <- gsub("-1$", "", bc_exp)
+exp <- exp[, match(metadata$BC, exp$barcodes)]
+```
+
+### Setup Aesthetics
+
+```{r setup_aes}
+mycolour <- "#000000FF" # Opaque Black
+
+theme_set(theme_gray())
+theme_update(text = element_text(colour = mycolour),
+             line = element_line(colour = mycolour),
+             aspect.ratio = 1,
+             axis.line  = element_line(colour = mycolour),
+             axis.ticks = element_line(colour = mycolour),
+             axis.text  = element_text(colour = mycolour),
+             legend.key = element_blank(),
+             panel.background = element_blank(),
+             panel.grid.major = element_line(colour = "grey95"),
+             panel.grid.minor = element_blank(),
+             plot.background  = element_blank(),
+             strip.background = element_blank(),
+             strip.text = element_text(colour = mycolour))
+
+rm(mycolour)
+```
+
+## Aim
+
+Have a look at the scRNAseq dataset of TLS.
+
+## Cell QC
+
+```{r, eval = FALSE}
+# Note: chunk not evaluated because metadata contains cells that passed original
+# author's QC criteria.
+
+# Criterium 1: Between 10,000 - 40,000 counts
+cs <- colSums(assay(exp))
+crit1 <- cs >= 10000 & cs <= 40000
+
+# Criterium 2: Mitochondrial fraction < 0.1
+rd <- rowData(exp)
+is_mito <- grepl("^mt-", rd$gene_symbol)
+mito <- colSums(assay(exp)[is_mito, ])
+frac_mito <- mito / cs
+crit2 <- frac_mito < 0.1
+
+# Criterium 3: More than 3,000 genes
+crit3 <- assay(exp) > 0
+crit3 <- colSums(crit3)
+crit3 <- crit3 > 3000
+
+keepcells <- crit1 & crit2 & crit3
+exp <- exp[, keepcells]
+```
+
+## Size factor normalisation
+
+```{r, eval = !("logcounts" %in% assayNames(exp))}
+# Don't consider genes expressed in <= 10 cells
+ncells <- rowSums(assay(exp) > 0)
+exp <- exp[ncells > 10, ]
+
+# Compute normalisation
+qc <- quickCluster(exp)
+exp <- computeSumFactors(exp, clusters = qc, min.mean = 0.1)
+exp <- logNormCounts(exp)
+
+exp$cluster <- metadata$cell_state
+reducedDim(exp, "UMAP_orig") <- as.matrix(metadata[, c("UMAP_1", "UMAP_2")])
+saveRDS(exp, here::here("rds", "XX_veenvliet2020_sce_preprocessed.rds"))
+```
+
+
+
+
+```{r}
+# Sanity check
+df <- data.frame(
+  libsize = colSums(assay(exp)) / sum(colSums(assay(exp))),
+  sumfact = sizeFactors(exp) / sum(sizeFactors(exp)),
+  sample = exp$sample
+)
+
+ggplot(df, aes(libsize, sumfact)) +
+  geom_abline(slope = 1, linetype = 2, colour = "red") +
+  geom_point(aes(colour = sample), shape = 16, size = 0.1) +
+  scale_colour_discrete(name = "Sample",
+                        guide = guide_legend(override.aes = list(size = 2))) +
+  scale_x_continuous(name = "Relative Library Size") +
+  scale_y_continuous(name = "Relative Size Factor")
+```
+
+## Feature selection
+
+```{r}
+cv2model <- modelGeneCV2(exp)
+fit <- metadata(cv2model)
+hvg <- getTopHVGs(cv2model, var.field = "ratio",
+                  n= 2000)
+
+df <- data.frame(
+  mean = fit$mean,
+  cv2 = fit$cv2,
+  hvg = {is_hvg <- seq_len(nrow(cv2model)) %in% hvg}
+)
+# is_hvg <- which(rownames(cv2model) %in% hvg)
+
+ggplot(df, aes(mean, cv2)) +
+  geom_point(aes(colour = hvg), shape = 16, size = 0.5) +
+  scale_x_continuous(name = "Mean", trans = "log10",
+                     labels = math_format(format = log10),
+                     guide = "axis_logticks") +
+  scale_y_continuous(name = "CV2", trans = "log10",
+                     labels = math_format(format = log10),
+                     guide = "axis_logticks") +
+  scale_colour_manual(
+    values = c("grey20", "dodgerblue"),
+    labels = c("LVG", "HVG"), name = "Variability"
+  ) +
+  theme(axis.ticks.length = unit(5.5, "pt"))
+```
+
+## PCA
+
+### No batch correction
+
+```{r}
+bcor <- runPCA(exp, subset_row = hvg,
+               scale = TRUE,
+               BSPARAM = IrlbaParam(extra.work = 100))
+
+pca <- reducedDim(bcor, "PCA")
+varexp <- attr(pca, "percentVar")
+
+df <- as.data.frame(pca)
+df$sample <- decode(exp$sample)
+
+ggplot(df, aes(PC1, PC2)) +
+  geom_point(aes(colour = sample)) +
+  scale_x_continuous(name = paste0("PC1 (", percent(varexp[1], scale = 1), ")")) +
+  scale_y_continuous(name = paste0("PC2 (", percent(varexp[2], scale = 1), ")")) +
+  coord_equal() +
+  theme(aspect.ratio = NULL)
+```
+### With batch correction
+
+```{r}
+batch <- decode(exp$sample)
+bcor0 <- fastMNN(exp[is_hvg, ], batch = batch, auto.merge = TRUE)
+
+
+bcor <- runPCA(bcor0, exprs_values = "reconstructed",
+               scale = TRUE,
+               BSPARAM = IrlbaParam(extra.work = 100))
+
+pca <- reducedDim(bcor, "PCA")
+varexp <- attr(pca, "percentVar")
+
+df <- as.data.frame(pca)
+df$sample <- decode(exp$sample)
+
+ggplot(df, aes(PC1, PC2)) +
+  geom_point(aes(colour = sample), shape = 16, size = 0.1) +
+  scale_x_continuous(name = paste0("PC1 (", percent(varexp[1], scale = 1), ")")) +
+  scale_y_continuous(name = paste0("PC2 (", percent(varexp[2], scale = 1), ")")) +
+  scale_colour_discrete(guide = guide_legend(override.aes = list(size = 2))) +
+  coord_equal() +
+  theme(aspect.ratio = NULL)
+```
+
+## tSNE
+
+```{r}
+set.seed(0)
+tsne <- Rtsne::Rtsne(reducedDim(bcor, "PCA")[, 1:30], pca = FALSE,
+                     eta = ncol(bcor) / 12,
+                     perplexity = 100, num_threads = 20,
+                     Y_init = reducedDim(bcor, "PCA")[, 1:2] * 0.001)
+reducedDim(exp, "tSNE") <- tsne$Y
+
+df <- data.frame(
+  x = tsne$Y[, 1],
+  y = tsne$Y[, 2],
+  sample = decode(exp$sample)
+)
+
+ggplot(df, aes(x, y, colour = sample)) +
+  geom_point(size = 0.2) +
+  # stat_funxy(aes(label = sample, group = sample),
+  #            geom = "text", colour = "black", funx = median, funy = median) +
+  scale_x_continuous(name = "tSNE 1", breaks = NULL) +
+  scale_y_continuous(name = "tSNE 2", breaks = NULL) +
+  scale_colour_discrete(
+    guide = guide_legend(override.aes = list(size = 2))
+  ) +
+  coord_equal() +
+  theme(aspect.ratio = NULL)
+```
+
+
+## UMAP
+
+```{r}
+setup <- umap::umap.defaults
+setup$n_neighbors <- 10
+umap <- umap::umap(reducedDim(bcor, "PCA")[, 1:30], config = setup)
+reducedDim(exp, "UMAP") <- umap$layout
+
+df <- umap_shape <- data.frame(
+  x = umap$layout[, 1],
+  y = umap$layout[, 2],
+  sample = decode(exp$sample)
+)
+# df <- df[sample(nrow(df)),]
+
+ggplot(df, aes(x, y, colour = sample)) +
+  geom_point(size = 0.5) +
+  # scale_x_continuous(name = "UMAP 1", breaks = NULL) +
+  # scale_y_continuous(name = "UMAP 2", breaks = NULL) +
+  scale_colour_discrete(
+    guide = guide_legend(override.aes = list(size = 2))
+  ) +
+  coord_equal() +
+  theme(aspect.ratio = NULL)
+```
+
+```{r}
+dx <- diff(range(df$x))
+dy <- diff(range(df$y))
+
+df$yy <- ifelse(df$y > -10, df$y, df$y + min(df$y) + 25)
+
+umap_shape <- data.frame(
+  x = df$x,
+  y = df$yy
+)
+
+ggplot(df, aes(x, yy, colour = sample)) +
+  geom_point(size = 0.5) +
+  # stat_funxy(aes(label = sample, group = sample),
+  #            geom = "text", colour = "black", funx = median, funy = median) +
+  scale_x_continuous(name = "UMAP 1", breaks = NULL) +
+  scale_y_continuous(name = "UMAP 2", breaks = NULL) +
+  scale_colour_discrete(
+    guide = guide_legend(override.aes = list(size = 2))
+  ) +
+  coord_equal() +
+  theme(aspect.ratio = NULL)
+```
+
+## Comparison
+
+```{r}
+df <- data.frame(
+  x = c(umap_shape$x, metadata$UMAP_1),
+  y = c(umap_shape$y, metadata$UMAP_2),
+  celltype = rep(metadata$cell_state, 2),
+  orig = rep(c("Computed", "Original"), c(nrow(umap_shape), nrow(metadata)))
+)
+
+ggplot(df, aes(x, y, colour = celltype)) +
+  geom_point(size = 0.2) +
+  scale_x_continuous(name = "UMAP 1", breaks = NULL) +
+  scale_y_continuous(name = "UMAP 2", breaks = NULL) +
+  scale_colour_discrete(guide = guide_legend(override.aes = list(size = 2))) +
+  ggforce::facet_row(vars(orig), scales = "free")
+```
+
+```{r}
+umap_shape <- data.frame(
+  x = metadata$UMAP_1,
+  y = metadata$UMAP_2,
+  sample = decode(exp$sample)
+)
+
+gene_table <- rowData(exp)
+
+plot_genes <- function(genes, shape = "UMAP", rescale = TRUE) {
+  genes_nr <- match(genes, gene_table$gene_symbol)
+  if (anyNA(genes_nr)) {
+    nagenes <- which(is.na(genes_nr))
+    message(paste0(genes[nagenes], " not found"))
+  }
+  genes_nr <- genes_nr[!is.na(genes_nr)]
+  
+  shape <- match.arg(shape, c("UMAP", "tSNE"))
+  if (shape == "UMAP") {
+    template <- umap_shape[, 1:2]
+  } else {
+    template <- data.frame(
+      x = tsne$Y[, 1],
+      y = tsne$Y[, 2]
+    )
+  }
+  
+  dat <- assay(exp, "logcounts")[genes_nr,, drop = FALSE]
+  dat <- as.data.frame(t(as.matrix(dat)))
+  colnames(dat) <- gene_table$gene_symbol[genes_nr]
+  if (rescale) {
+    dat[] <- lapply(dat, scales::rescale)
+  }
+  
+  df <- cbind(template, dat)
+  df <- tidyr::pivot_longer(df, c(-x, -y), names_to = "gene")
+  
+  ggplot(df, aes(x, y)) +
+    geom_point(aes(colour = value), size = 0.5) +
+    facet_wrap(~ gene) +
+    scale_colour_viridis_c(
+      name = "Expression",
+      breaks = c(0, 1), limits = c(0, 1), labels = c("Min", "Max")
+    ) +
+    scale_x_continuous(breaks = NULL, name = paste0(shape, " 1")) +
+    scale_y_continuous(breaks = NULL, name = paste0(shape, " 2")) +
+    coord_equal() +
+    theme(aspect.ratio = NULL)
+}
+```
+
+
+```{r}
+plot_genes(
+  c("Tbx6", "Etv2", "Sox2", "Cdx2", "Rfx4", "Twist1", "Sox21", "Ctcf",
+    "T")
+)
+```
+```{r}
+plot_genes(c("Hoxd9", "Cdx1", "Cdx4", "Cdx2", "Gata6", "Meis1"))
+```
+
+```{r}
+plot_genes(c("Pou5f1", "Klf2", "Foxd2", "Foxc2", "Zbtb18", "Foxc1"))
+```
+
+```{r}
+# Pou3f2 = N-Oct3
+plot_genes(c("Pou3f2", "Zic5", "Rarg", "Hoxc10"))
+```
+
+```{r}
+plot_genes(c("T", "Cdx2"))
+```
+
+## References
+
+
+<div id="refs"></div>
+
+## Session Info
+
+<p>
+  <a class="btn btn-primary" data-toggle="collapse" href="#sinfo" role="button" aria-expanded="false" aria-controls="sinfo">
+    View
+  </a>
+</p>
+<div class="collapse" id="sinfo">
+  <div class="card card-body">
+
+```{r session_info, include=TRUE, echo=FALSE, results = "asis"}
+pkgs <- loadedNamespaces()
+libTvdB::format_sessioninfo_html(pkgs)
+```
+
+  </div>
+</div>
+
+
+
+
