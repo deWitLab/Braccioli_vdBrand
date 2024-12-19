@@ -1,0 +1,385 @@
+---
+title: "Untitled"
+author: 
+  - name: "Teun van den Brand"
+    email: "t.vd.brand@nki.nl"
+    affiliation: "Netherlands Cancer Institute"
+date: '`r format(Sys.time(), "%d/%m/%Y")`'
+output: 
+  html_document:
+    theme: united
+    highlight: pygments
+    fig_caption: yes
+    code_folding: hide
+    df_print: kable
+    toc: true
+    toc_depth: 4
+    toc_float:
+      collapsed: false
+bibliography: /DATA/users/t.vd.brand/bibliography/articles.bibtex
+knit: |
+  # Redirect output to HTML folder
+  (function(inputFile, encoding) {
+    outputFile <- gsub("Rmd$", "html", basename(inputFile))
+    rmarkdown::render(
+      input = inputFile,
+      encoding = encoding,
+      output_file = here::here("html", outputFile)
+    )
+  })
+---
+
+## Setup {.tabset}
+
+<!-- little HTML script to do indentation of the table of contents -->
+<script>
+    $(document).ready(function() {
+      $items = $('div#TOC li');
+      $items.each(function(idx) {
+        num_ul = $(this).parentsUntil('#TOC').length;
+        $(this).css({'text-indent': num_ul * 10, 'padding-left': 0});
+      });
+
+    });
+</script>
+
+```{css, echo = FALSE}
+div.sourceCode {
+  overflow-x: hidden;
+}
+```
+
+### Load packages
+
+```{r stfu, include = FALSE}
+# No, I do *not* want your start-up messages, thank you very much
+library <- function(...) {
+  suppressPackageStartupMessages(base::library(...))
+}
+```
+
+
+```{r load_packages}
+library(ggplot2)
+library(scales)
+library(here)
+library(SingleCellExperiment)
+library(ggrepel)
+library(ggh4x)
+library(ggnewscale)
+library(colorspace)
+library(rtracklayer)
+library(tornadoplot)
+library(data.table, exclude = "shift")
+library(ggrastr)
+source(here("rscripts", "project_functions_plotting.R"))
+```
+
+### Load data
+
+```{r load_data}
+gast <- readRDS(here("rds", "06_LSI_experiment.rds"))
+
+gast_bw <- list.files(
+  here("data_raw", "bigwig"),
+  pattern = "^06_Cluster_", full.names = TRUE
+)
+gast_bw <- setNames(
+  gast_bw,
+  gsub("^06_Cluster_|\\.bw$", "", basename(gast_bw))
+)
+gast_bw <- BigWigFileList(gast_bw[-length(gast_bw)])
+
+
+
+embryo_bw <- list.files(
+  here("data_raw", "external", "pijuansala2020", "bigwigs_reprocessed"),
+  pattern = "\\.bw$", full.names = TRUE
+)
+embryo_bw <- setNames(
+  embryo_bw,
+  gsub("\\.bw$", "", basename(embryo_bw))
+)
+embryo_bw <- BigWigFileList(embryo_bw)
+
+stats <- readRDS(here("rds", "06_peak_statistics.rds"))
+```
+
+
+## Aim
+
+```{r}
+bws <- BigWigFileList(lapply(list(
+  "NMP Gastruloid"  = gast_bw[["B"]],
+  "NMP Embryo"      = embryo_bw[["nmp"]],
+  "SC Gastruloid"   = gast_bw[["C"]],
+  "SC Embryo"       = embryo_bw[["spinal_cord"]],
+  "SMD Gastruloid"  = gast_bw[["D"]],
+  "SMD Embryo"      = embryo_bw[["somitic_mesoderm"]],
+  "PxMD Gastruloid" = gast_bw[["E"]],
+  "PxMD Embryo"     = embryo_bw[["paraxial_mesoderm"]]
+), path))
+
+loci <- c(
+  "Sox2"  = "chr3:34543696-34740313",
+  "Frzb"  = "chr2:80379856-80474367"
+)
+loci <- GRanges(loci)
+start(loci) <- round(start(loci), -4)
+end(loci) <- round(end(loci), -4)
+
+locus_title <- setNames(paste0(
+  decode(seqnames(loci)), ":",
+  number(start(loci), big.mark = ","), "-",
+  number(end(loci), big.mark = ",")
+), names(loci))
+
+binwidth <- 100
+tracks <- lapply(bws, function(bw) {
+  dat <- summary(bw, which = loci, size = ceiling(width(loci) / binwidth),
+                 as = "GRangesList", type = "mean")
+  dat <- lapply(dat, function(d) {
+    mid <- mid(d)
+    data.frame(
+      x = c(min(mid), mid, max(mid)),
+      y = c(0, score(d), 0)
+    )
+  })
+  data.table::rbindlist(setNames(dat, names(loci)), idcol = "locus")
+})
+tracks <- data.table::rbindlist(tracks, idcol = "clust")
+tracks[, c("tissue", "model") := tstrsplit(clust, " ")]
+tracks[, max := max(y), by = c("locus", "model")]
+tracks[, y_scaled := (y / max) * 0.95]
+tracks$clust_match <- 8 - match(tracks$clust, names(bws))
+tracks[, y_shift := y_scaled + clust_match]
+
+ranges <- tracks[, .SD[1], by = c("clust", "locus")]
+ranges[, label := paste0("[", 0, " - ", round(max), "]")]
+
+labels <- tracks$clust[!duplicated(tracks$clust_match)]
+labels <- do.call(paste, rev(tstrsplit(labels, " ")))
+
+genes <- retrieve_ncbi_genemodel(loci, names(loci))
+genes$facet <- factor("genes", levels = c("tracks", "genes"))
+tracks$facet <- ranges$facet <- factor("tracks", levels = c("tracks", "genes"))
+
+colours <- metadata(gast$clusters)$colours
+
+p <- ggplot(tracks, aes(x, ymax =  y_shift, group = clust)) +
+  geom_ribbon(
+    aes(ymin = clust_match, fill = tissue, colour = after_scale(darken(fill, 0.3))), 
+    linewidth = 0.25
+  ) +
+  geom_hline(
+    data = tracks[!duplicated(cbind(clust, locus)), ],
+    aes(yintercept = clust_match)
+  ) +
+  geom_text(
+    data = ranges, 
+    aes(x = -Inf, y = clust_match + 0.95, label = label),
+    hjust = 0, vjust = 2
+  ) +
+  geom_genemodel_rects(genes, thin = 0.1, thick = 0.1) +
+  facet_grid(facet ~ locus, scales = "free", space = "free") +
+  scale_y_facet(
+    facet == "tracks",
+    breaks = tracks$clust_match[!duplicated(tracks$clust_match)],
+    labels = labels,
+    expand = c(0, 0),
+    guide  = guide_axis_nested(delim = " "),
+    name   = NULL
+  ) +
+  scale_y_facet(
+    facet != "tracks",
+    breaks = NULL,
+    expand = c(0.5, 0)
+  ) +
+  scale_x_facet(locus == "Frzb", breaks = min, 
+                labels = locus_title["Frzb"]) +
+  scale_x_facet(locus == "Sox2", breaks = min,
+                labels = locus_title["Sox2"]) +
+  scale_fill_manual(
+    breaks = c("NMP", "SC", "SMD", "PxMD"),
+    values = colours[c(2,3,4,5)],
+    guide  = "none"
+  ) +
+  labs(x = NULL) +
+  coord_cartesian(clip = "off") +
+  force_panelsizes(
+    rows = unit(c(5.546, 0.5), "cm")
+  ) +
+  theme(
+    axis.text.x.bottom = element_text(hjust = 0),
+    axis.text.y.left = element_text(margin = margin(r = 2, l = 2), vjust = 0),
+    axis.ticks.x.bottom = element_blank(),
+    axis.ticks.y.left = element_blank(),
+    axis.line.y.left = element_blank(),
+    aspect.ratio = NULL,
+    panel.grid.major = element_blank(),
+    strip.text.y.right = element_blank(),
+    plot.margin = margin()
+  )
+
+
+p
+```
+
+```{r}
+ggsave(
+  here("figures", "random_figures", "Rev_Sox2_Frzb_loci.svg"),
+  plot = p,
+  device = svglite::svglite, width = 170, height = 86, units = "mm",
+  fix_text_size = FALSE
+)
+```
+
+### Heatmap
+
+```{r}
+bws <- BigWigFileList(lapply(list(
+  "Prog Gastruloid" = gast_bw[["A"]],
+  
+  "NMP Embryo"      = embryo_bw[["nmp"]],
+  "NMP Gastruloid"  = gast_bw[["B"]],
+  
+  "SC Embryo"       = embryo_bw[["spinal_cord"]],
+  "SC Gastruloid"   = gast_bw[["C"]],
+  
+  "SMD Embryo"      = embryo_bw[["somitic_mesoderm"]],
+  "SMD Gastruloid"  = gast_bw[["D"]],
+  
+  "PxMD Embryo"     = embryo_bw[["paraxial_mesoderm"]],
+  "PxMD Gastruloid" = gast_bw[["E"]],
+  
+  "PhMD Embryo"     = embryo_bw[["pharyngeal_mesoderm"]],
+  "PhMD Gastruloid" = gast_bw[["F"]],
+  
+  "Enth Embryo"     = embryo_bw[["endothelium"]],
+  "Enth Gastruloid" = gast_bw[["G"]]
+  
+), path))
+
+bws <- c(BigWigFileList(c("mESC Cells"      = "/DATA/projects/gastruloids/processed_data/bulkatac/bigwig/22_LB_WT-E14_GTAGAGGA-CTCTCTAT_S22.bw")), bws)
+```
+
+
+```{r}
+thres_pvalue <- 0.05
+thres_effect <- log(1.5)
+
+peaks <- stats$ranges
+peaks <- GenomicRanges::shift(resize(peaks, 1, fix = "start"), peaks$peak)
+
+clust_groups <- sort(unique(gast$clusters$cluster))
+clust_groups <- setNames(nm = clust_groups)
+
+pvalue_columns <- colnames(stats)[grepl("_pvalue$", colnames(stats))]
+pvalue_columns <- setNames(
+  pvalue_columns,
+  gsub("^cluster_|_pvalue$", "", pvalue_columns)
+)
+effect_columns <- colnames(stats)[grepl("_estimate$", colnames(stats))]
+effect_columns <- setNames(
+  effect_columns,
+  gsub("^cluster_|_estimate$", "", effect_columns)
+)
+
+peak_groups <- lapply(clust_groups, function(i) {
+  pvalue <- p.adjust(stats[[pvalue_columns[i]]], "fdr")
+  effect <- stats[[effect_columns[i]]]
+  pick <- which(pvalue < thres_pvalue & effect > thres_effect)
+  peaks[pick]
+})
+peak_groups <- as(peak_groups, "GRangesList")
+peak_groups$H <- NULL
+```
+
+```{r}
+tor <- build_tornado(peak_groups, bws[-c(1, 2)])
+tor <- sort_tornado(tor)
+
+scale <- scale_fill_continuous_sequential(
+  palette = "PuBu",
+  limits  = c(0, 20), oob = oob_squish,
+  labels  = number_format(accuracy = 1),
+  name    = "RPGC",
+  breaks  = breaks_width(10),
+  guide   = guide_colourbar(barwidth = unit(30, "mm"),
+                            barheight = unit(2.5, "mm"),
+                            title.position = "left", title.hjust = 1,
+                            title.vjust = 0.5)
+)
+
+dat <- prep_tornado(tor, scale = scale)
+dat$study  <- factor(tstrsplit(dat$sample, " ")[[2]], 
+                     levels = c("Gastruloid", "Embryo"),
+                     labels = c("Gast", "Emb"))
+dat$cluster <- factor(
+  tstrsplit(dat$sample, " ")[[1]],
+  levels = c("NMP", "SC", "SMD", "PxMD", "PhMD", "Enth")
+)
+
+dat$feature_set <- factor(
+  dat$feature_set, LETTERS[2:7],
+  c("NMP", "SC", "SMD", "PxMD", "PhMD", "Enth")
+)
+
+# dat$sample <- factor(dat$sample_name, names(bws))
+```
+
+```{r}
+torplot <- ggplot(dat) +
+  autolayer(dat) +
+  facet_nested(
+    "Gastruloid Peaks" + feature_set ~ cluster + study,
+    scales = "free", space = "free_y", switch = "y",
+    strip = strip_nested(
+      clip = "off",
+      text_y = elem_list_text(angle = c(90, 90)),
+      by_layer_y = TRUE
+    )
+  ) +
+  scale_y_continuous(
+    expand = c(0, 0),
+    breaks = force,
+    labels = function(x){c("\n", x[2] - 0.5)}
+  ) +
+  scale_x_facet(
+    COL == 1, expand = c(0, 0.5, 0, 0), breaks = c(-2:2)*1000,
+    labels = c("\u22122", "", "0", "", "+2")
+  ) +
+  scale_x_facet(
+    COL != 1, expand = c(0, 0.5, 0, 0), breaks = c(-2:2)*1000,
+    labels = c("", "", "", "", "")
+  ) +
+  force_panelsizes(cols = unit(0.5, "cm")) +
+  theme(
+    aspect.ratio = NULL,
+    strip.placement = "outside",
+    legend.position = "bottom",
+    legend.justification = "right",
+    axis.text.y.left = element_text(angle = 90, hjust = 1)
+  )
+```
+
+```{r}
+ggsave(
+  here("figures", "manuscript", "FigS2_Tornado_Both.svg"), plot = torplot,
+  device = svglite::svglite, width = 140, height = 120 + 34.128 - 47.613, units = "mm",
+  fix_text_size = FALSE
+)
+```
+
+
+
+## References
+
+<div id="refs"></div>
+
+## Session Info
+
+```{r session_info, include=TRUE, echo=FALSE, results = "asis"}
+pkgs <- loadedNamespaces()
+libTvdB::format_sessioninfo_html(pkgs)
+```

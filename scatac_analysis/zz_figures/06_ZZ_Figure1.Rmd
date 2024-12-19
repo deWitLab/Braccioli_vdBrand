@@ -1,0 +1,807 @@
+---
+title: "Figure 1"
+author: 
+  - name: "Teun van den Brand"
+    email: "t.vd.brand@nki.nl"
+    affiliation: "Netherlands Cancer Institute"
+date: '`r format(Sys.time(), "%d/%m/%Y")`'
+output: 
+  html_document:
+    theme: united
+    highlight: pygments
+    fig_caption: yes
+    code_folding: hide
+    df_print: kable
+    toc: true
+    toc_depth: 4
+    toc_float:
+      collapsed: false
+bibliography: /DATA/users/t.vd.brand/bibliography/articles.bibtex
+---
+
+## Setup {.tabset}
+
+<!-- little HTML script to do indentation of the table of contents -->
+<script>
+    $(document).ready(function() {
+      $items = $('div#TOC li');
+      $items.each(function(idx) {
+        num_ul = $(this).parentsUntil('#TOC').length;
+        $(this).css({'text-indent': num_ul * 10, 'padding-left': 0});
+      });
+
+    });
+</script>
+
+```{css, echo = FALSE}
+div.sourceCode {
+  overflow-x: hidden;
+}
+```
+
+### Load packages
+
+```{r load_packages, results = 'hide', warning = FALSE, message = FALSE}
+library(SingleCellExperiment)
+library(Rsamtools)
+library(rtracklayer)
+library(data.table, exclude = c("shift", "first", "second"))
+library(ggnewscale)
+library(ggplot2)
+library(here)
+library(farver)
+library(scales)
+library(ggh4x)
+library(patchwork)
+library(ggrastr)
+library(ggfittext)
+library(colorspace)
+library(farver)
+source(here("rscripts", "project_functions_plotting.R"))
+```
+
+### Load data
+
+```{r load_data}
+# Files
+exp_file   <- here("rds", "06_LSI_experiment.rds")
+stats_file <- here("rds", "06_peak_statistics.rds")
+
+exp   <- readRDS(exp_file)
+stats <- readRDS(stats_file)
+
+reads  <- readRDS(here("rds", "04_GRanges_joined.rds"))
+bw_dir <- here("data_raw", "bigwig")
+bws    <- list.files(bw_dir, pattern = "^06_Cluster_", full.names = TRUE)
+
+# Load data
+# tabix <- TabixFile(tabix)
+bws   <- BigWigFileList(
+  setNames(bws, gsub("^06_Cluster_|\\.bw$", "", basename(bws)))
+)
+```
+
+## Aim
+
+Make figures for the manuscript
+
+```{r}
+exp <- exp[, exp$batch != "KOs"]
+
+# Global variables
+time <- exp$sample
+levels(time) <- c(levels(time)[1:4], "120h", "120h (TLS)", levels(time)[7:length(levels(time))])
+# time <- gsub(" \\(.M\\)", "", as.character(exp$sample))
+# time <- factor(time, levels = c("72h", "80h", "88h", "96h", "120h"),
+#                ordered = TRUE)
+
+clust  <- exp$clusters$cluster
+uclust <- sort(unique(clust))
+clust_nms <- setNames(
+  c("Prog", "NMP", "SC", "SMD", "PxMD", "PhMD", "Enth", "Endo"),
+  uclust
+)
+```
+
+## Time / Cluster UMAPs
+
+```{r}
+df <- reducedDim(exp, "UMAP")
+df <- data.frame(
+  x = df[, 1], 
+  y = df[, 2],
+  time  = time,
+  clust = clust_nms[clust]
+)
+
+facetfactors <- factor(1:2, labels = c("Timepoints", "Clusters"))
+
+edge_colour <- function(x, value = 0.3) {
+  colorspace::darken(x, 1 - value)
+}
+
+clust_colour <- metadata(exp$clusters)$colours
+
+size <- unit(40, "mm") - unit(5.5 * 0.5, "pt")
+
+umaps <- ggplot(df, aes(x, y)) +
+  rasterise(
+    geom_outline_point(
+      data = ~ cbind(.x, facet = facetfactors[1]),
+      aes(colour = time,
+          stroke_colour = after_scale(edge_colour(colour_new))),
+      size = 0.5
+    ), dpi = 300, dev = "ragg"
+  ) +
+  scale_colour_manual(
+    name = "Time",
+    values = viridisLite::turbo(6),
+    guide  = guide_legend(override.aes = list(size = 2))
+  ) +
+  new_scale_colour() +
+  rasterise(
+    geom_outline_point(
+      data = ~ cbind(.x, facet = facetfactors[2]),
+      aes(colour = clust, 
+          stroke_colour = after_scale(edge_colour(colour))),
+      size = 0.5
+    ), dpi = 300, dev = "ragg"
+  ) +
+  scale_colour_manual(
+    name = "Clusters",
+    limits = clust_nms,
+    values = clust_colour,
+    guide = guide_legend(override.aes = list(size = 2), ncol = 2)
+  ) +
+  scale_x_continuous(name = "UMAP 1", breaks = NULL) +
+  scale_y_continuous(name = "UMAP 2", breaks = NULL) +
+  facet_wrap(~ facet) +
+  force_panelsizes(cols = grid::unit.c(size, size),
+                   rows = 1.13575097725935 * size) +
+  coord_equal() +
+  theme(aspect.ratio = NULL,
+        strip.text.x = element_text(hjust = 0),
+        legend.position = "bottom",
+        legend.direction = "vertical",
+        legend.key.size = unit(0.5, "lines"),
+        plot.margin = unit(c(0,0,0,0), "pt"))
+
+legends <- ggplotGrob(umaps)
+legends <- legends$grobs[[grep("^guide-box$", legends$layout$name)]]
+legends <- legends$grobs[grep("^guides$", legends$layout$name)]
+
+time_legend <- legends[[2]]
+time_legend <- custom_annotation(time_legend,
+                                 xmin = -5, xmax = -0, ymax = Inf, ymin = -Inf)
+time_legend$data$facet <- facetfactors[1]
+
+clust_legend <- legends[[1]]
+clust_legend <- custom_annotation(clust_legend)
+clust_legend$data$facet <- facetfactors[2]
+
+umaps <- umaps + guides(colour = "none", colour_new = "none")
+umaps <- umaps + time_legend + clust_legend
+umaps
+```
+
+```{r}
+ggsave(
+  here("figures", "manuscript", "Fig1_UMAP_timeclust.svg"), plot = umaps,
+  device = svglite::svglite, width = 90, height = 90, unit = "mm",
+  fix_text_size = FALSE
+)
+```
+
+## Irx3 locus
+
+Declare locus.
+
+```{r}
+locus <- GRanges("chr8:91783728-91893848")
+
+start(locus) <- round(start(locus), -4)
+end(locus)   <- round(end(locus), -4)
+```
+
+Read fragments from tabix.
+
+```{r}
+alias <- order(clust, -exp$QC_stats$unique, decreasing = TRUE)
+alias <- exp$alias[alias]
+alias <- alias[exp$clusters$cluster[match(alias, exp$alias)] != "H"]
+
+reads <- reads[overlapsAny(reads, locus)]
+reads$alias <- Rle(paste0(
+  runValue(reads$barcode), "&", reads$batch[start(reads$barcode)]
+), runLength(reads$barcode))
+
+reads <- data.table(
+  chrom = decode(seqnames(reads)),
+  start = start(reads),
+  end   = end(reads),
+  y     = decode(match(reads$alias, alias)),
+  clust = clust[decode(match(reads$alias, exp$alias))],
+  alias = decode(reads$alias)
+)
+reads <- reads[!is.na(y)]
+reads[, clust := clust_nms[clust]]
+
+# reads <- scanTabix(tabix, param = locus)[[1]]
+# reads <- read.table(
+#   text = reads, sep = "\t",
+#   col.names = c("chrom", "start", "end", "barcode", "duplicates")
+# )
+# reads <- transform(
+#   reads,
+#   y = match(barcode, alias),
+#   clust = clust[match(barcode, exp$alias)]
+# )
+```
+
+Read bigwigs.
+
+```{r}
+uclust <- uclust[uclust != "H"]
+binwidth <- 150
+nbins  <- ceiling(width(locus) / binwidth)
+
+tracks <- lapply(bws[names(bws) != "H"], function(bw) {
+  dat <- summary(bw, which = locus, size = nbins, type = "mean")[[1]]
+  mid <- mid(dat)
+  list2DF(list(
+    x = c(min(mid), mid, max(mid)),
+    y = c(0, score(dat), 0)
+  ))
+})
+tracks <- rbindlist(tracks, idcol = "clust")
+offset <- max(tracks$y) * 1.05
+tracks[, ypos := (length(uclust) - match(clust, uclust)) * offset]
+tracks[, clust := clust_nms[clust]]
+```
+
+Retrieve gene models.
+
+```{r}
+fac <- c("", "Average Tracks", "Single Cells")
+fac <- factor(fac, levels = fac)
+
+gene <- retrieve_ncbi_genemodel(locus, "Irx3")
+gene$facet <- fac[1]
+```
+
+```{r}
+phi <- 2/(1 + sqrt(5))
+breaks <- seq(0, 6, 1) * offset
+
+scalebar_width <- 5e3
+
+track_plot <- ggplot(reads) +
+  rasterise(
+    geom_segment(
+      aes(x = start, y = y, xend = end, yend = y, colour = clust),
+      size = 0.1, data = ~ cbind(.x, facet = fac[3])),
+    dpi = 300, dev = "ragg"
+  ) +
+  geom_genemodel_rects(gene) +
+  geom_polygon(
+    data = cbind(tracks, facet = fac[2]),
+    aes(x, ypos + y, fill = clust,
+        colour = after_scale(darken(fill, 0.3))),
+    size = 0.25
+  ) +
+  geom_hline(
+    data = data.frame(y = breaks, facet = fac[2]),
+    aes(yintercept = y)
+  ) +
+  scale_fill_manual(
+    aesthetics = c("colour", "fill"),
+    limits = clust_nms,
+    values = clust_colour,
+    guide = "none"
+  ) +
+  scale_x_continuous(
+    name = paste0(
+      decode(seqnames(locus)), ":",
+      number(start(locus), big.mark = ","), "-",
+      number(end(locus), big.mark = ",")
+    ),
+    limits = c(start(locus), end(locus)),
+    # breaks = NULL,
+    expand = c(0,0),
+    oob = oob_squish,
+  ) +
+  facet_grid2(
+    facet ~ ., 
+    switch = "y", scales = "free_y",
+    strip = strip_themed(
+      text_y = elem_list_text(angle = c(0, 90, 90),
+                              vjust = c(0.5, 0, 0))
+    )) +
+  facetted_pos_scales(y = list(
+    facet == "" ~ scale_y_continuous(
+      breaks = 0, labels = "Irx3"#, guide = "none"
+    ),
+    facet == "Average Tracks" ~ scale_y_continuous(
+      expand = c(0, 0), breaks = c(40 + breaks),
+      limits = c(0, 7 * offset), name = NULL,
+      labels = function(x) {c(rep('"', length(x) - 1), 40)},
+      guide  = guide_axis_truncated(
+        trunc_lower = breaks,
+        trunc_upper = breaks + 40
+      ),
+      sec.axis = dup_axis(
+        breaks = 0:6*offset, labels = clust_nms[7:1],
+        guide  = guide_axis_manual(label_colour = rev(clust_colour)[-1])
+      )
+    ),
+    facet == "Single Cells" ~ scale_y_continuous(
+      expand = c(0, 0), limits = c(0, ncol(exp)), name = NULL,
+      labels = number_format(1, scale = 1e-3, suffix = "k"),
+      breaks = breaks_width(3000)
+    )
+  )) +
+  coord_cartesian(clip = "off") +
+  # force_panelsizes(rows = unit(c(0.25, 1, 1), c("cm", "null", "null")),
+  #                  cols = (1 + sqrt(5))/2, respect = TRUE) +
+  force_panelsizes(cols = unit(80, "mm"),
+                   rows = unit(c(2.5, 80 * phi, 80 * phi), "mm")) +
+  guides(x.sec = guide_axis_scalebar(size = 5e3, label = "5kb")) +
+  labs(y = NULL) +
+  theme(panel.grid.major =  element_blank(),
+        strip.placement = "outside",
+        axis.line.y.right = element_blank(),
+        axis.ticks.y.right = element_blank(),
+        axis.text.y.right = element_text(hjust = 0, vjust = 0, face = "bold"),
+        axis.title.x.bottom = element_text(hjust = 0),
+        axis.ticks.length.x.top = unit(-0.5, "cm"),
+        axis.text.x.bottom = element_blank(),
+        axis.ticks.x.bottom = element_blank(),
+        axis.ticks.length.x.bottom = unit(0, "pt"),
+        plot.margin = unit(c(0,0,0,0), "pt"))
+track_plot
+```
+
+```{r}
+ggsave(here("figures", "manuscript", "Fig1_Irx3_locus.svg"), track_plot,
+       device = svglite::svglite, width = 100, height = 150, units = "mm",
+       fix_text_size = FALSE)
+```
+
+## Mosaic Plot
+
+```{r}
+# Tabulate
+tab <- table(cluster = clust,
+             time = droplevels(time))
+df <- as.data.table(as.data.frame(tab))
+
+# Calculate offsetted marginal sums
+width <- 0
+rs <- cumsum(c(0, rowSums(tab)))
+cs <- cumsum(c(0, colSums(tab)))
+rmatch <- match(df$cluster, rownames(tab))
+cmatch <- match(df$time, colnames(tab))
+
+# Make data for bars
+df[, `:=`(
+  y    = (rs[rmatch] + rs[rmatch + 1]) / 2,
+  xmin = cs[cmatch]  + (cmatch - 1) * width,
+  xmax = cs[cmatch + 1] + (cmatch - 1) * width
+)]
+
+# Calculate heights
+df[, `:=`(
+  ymax = cumsum(Freq) / sum(Freq),
+  ymin = (cumsum(Freq) - Freq) / sum(Freq)
+), by = "time"]
+
+dy <- df$ymax - df$ymin
+dx <- rescale(df$xmax - df$xmin, from = range(c(df$xmax, df$xmin)))
+asp <- dy/dx
+
+df$rot <- ifelse(asp > 1.2, 270, 0)
+
+mosaic <- ggplot(df, aes(xmin = xmin, xmax = xmax, 
+                         ymin = ymin, ymax = ymax,
+                         fill = cluster)) +
+  geom_rect(colour = "white", alpha = 0.8) +
+  geom_fit_text(aes(label = number(Freq, big.mark = ",", accuracy = 1),
+                    angle = rot), min.size = 2,
+                size = 6) +
+  scale_fill_manual(
+    values = clust_colour,
+    guide = "none"
+  ) +
+  scale_x_continuous(
+    breaks = ((head(cs, -1) + tail(cs, -1)) / 2) + ((seq_along(cs[-1]) - 1) * width),
+    labels = paste0(number(colSums(tab), big.mark = ","), 
+                    "\n", tail(names(cs), -1)),
+    expand = c(0, 0), name = "Timepoints"
+  ) +
+  scale_y_continuous(
+    position = "right", name = "Cluster counts",
+    breaks = with(subset(df, time == "120h (TLS)"),
+                  (ymin + ymax) / 2),
+    labels = with(
+      subset(df, time == "120h"), 
+      paste0(clust_nms[cluster], " ", 
+             number(rowSums(tab), big.mark = ",", accuracy = 1))
+    ),
+    expand = c(0, 0)
+  ) +
+  theme(axis.line = element_blank(),
+        axis.ticks = element_blank(),
+        axis.ticks.length = unit(0, "pt"),
+        axis.title = element_blank(),
+        panel.grid.major = element_blank())
+
+mosaic
+```
+
+## Peak Stats
+
+```{r}
+pval_cols <- paste0("cluster_", uclust, "_pvalue")
+efft_cols <- paste0("cluster_", uclust, "_estimate")
+
+pos_sets <- mapply(function(pvalue, effect) {
+  p.adjust(pvalue, "fdr") < 0.05 & effect > log(1.5)
+}, pvalue = stats[pval_cols], effect = stats[efft_cols])
+
+neg_sets <- mapply(function(pvalue, effect) {
+  p.adjust(pvalue, "fdr") < 0.05 & effect < log(1.5)
+}, pvalue = stats[pval_cols], effect = stats[efft_cols])
+
+colnames(pos_sets) <- colnames(neg_sets) <- uclust
+
+cs <- data.frame(
+  clust = uclust,
+  pos = colSums(pos_sets),
+  neg = colSums(neg_sets)
+)
+
+ggplot(cs, aes(pos, neg)) +
+  geom_point(aes(colour = clust), size = 2) +
+  geom_text(aes(label = clust), hjust = 2) +
+  scale_colour_clusters(guide = "none") +
+  scale_x_continuous(limits = c(0, NA)) +
+  scale_y_continuous(limits = c(0, NA))
+```
+
+```{r}
+df <- as.data.table(pos_sets)
+df <- df[, .(n = .N), by = uclust]
+df <- df[, .(label = paste0(uclust[unlist(.SD)], collapse = "&"), n = n), 
+         by = .(id = seq_along(n))]
+df <- df[nzchar(label)]
+df[, label := ifelse(n < 50, "Other", label)]
+df <- df[, .(n = sum(n)), by = label]
+df <- df[order(label == "Other", -n)]
+
+ggplot(df, aes(label, n)) +
+  geom_col(width = 2 / (1 + sqrt(5))) +
+  scale_x_discrete(
+    limits = df$label
+  ) +
+  scale_y_continuous(
+    expand = c(0,0,0.1,0),
+    name = "Marker Peaks (× 1000)",
+    labels = number_format(accuracy =  1, scale = 1e-3)
+  ) +
+  ggupset::axis_combmatrix(sep = "&") +
+  theme(axis.ticks.x.bottom = element_blank(),
+        aspect.ratio = 1)
+```
+
+```{r}
+df[, xpos := match(label, label)]
+clustother <- c(uclust, "Other")
+
+barbit <- ggplot(df, aes(xpos, n)) +
+  geom_col(width = 2 / (1 + sqrt(5)),
+           aes(fill = label, 
+               colour = after_scale(darken(fill, 0.25, space = "HLS"))),
+           show.legend = FALSE, size = 1 / .pt) +
+  scale_fill_manual(
+    values = c(setNames(clust_colour, LETTERS[1:8])), na.value = "grey50"
+  ) +
+  scale_x_continuous(expand = c(0, 0),
+                     limits = range(df$xpos) + c(-1, 1)) +
+  scale_y_continuous(
+    expand = c(0,0,0.1,0),
+    name = expression("Marker Peaks (× 10"^3*")"),
+    labels = number_format(accuracy =  1, scale = 1e-3)
+  ) +
+  theme(axis.ticks.x.bottom = element_blank(),
+        axis.text.x.bottom = element_blank(),
+        axis.title.x = element_blank(),
+        panel.grid.major.x = element_blank(),
+        plot.margin = margin(0,0,0,0),
+        aspect.ratio = NULL)
+
+upset <- setNames(strsplit(df$label, "&"), df$label)
+upset <- vapply(upset, `%in%`, x = clustother, logical(length(clustother)))
+rownames(upset) <- clustother
+
+upset_lines <- apply(upset, 2, which)
+upset_lines <- upset_lines[lengths(upset_lines) > 1]
+upset_lines <- data.frame(
+  x = names(upset_lines),
+  y = vapply(upset_lines, min, 1),
+  yend = vapply(upset_lines, max, 1)
+)
+upset_lines$xpos <- match(upset_lines$x, df$label)
+
+upset <- reshape2::melt(upset)
+upset$xpos <- match(upset$Var2, df$label)
+upset$ypos <- match(upset$Var1, clustother)
+
+upsetbit <- ggplot(upset, aes(xpos, ypos)) +
+  annotate(
+    "tile", y = c(2,4,6,8), x = 1,
+    width = Inf, height = 1, fill = "grey95"
+  ) +
+  geom_text(
+    data = data.frame(ypos = match("Other", clustother),
+                      xpos = match("Other", df$label)),
+    label = "Other",
+    size = 6 / .pt, hjust = 1, vjust = 0.5,
+    nudge_x = -0.5
+  ) +
+  geom_point(
+    data = ~ subset(.x, Var1 != "Other" | value == "TRUE"),
+    aes(shape = value, colour = value), 
+    show.legend = FALSE, size = 1
+  ) +
+  geom_segment(
+    data = upset_lines,
+    aes(x = xpos, xend = xpos, y = y, yend = yend),
+    inherit.aes = FALSE
+  ) +
+  scale_shape_manual(
+    values = c("FALSE" = 1, "TRUE" = 19)
+  ) +
+  scale_colour_manual(
+    values = c("FALSE" = "grey80", "TRUE" = "black")
+  ) +
+  scale_y_continuous(
+    limits = rev(c(0.5, length(clustother) - 0.5)),
+    breaks = seq_along(clustother),
+    labels = c(head(clust_nms, -1), "Other"),
+    trans = "reverse", oob = oob_keep,
+    name = NULL, expand = c(0,0)
+  ) +
+  scale_x_continuous(
+    limits = c(0, length(df$x) + 1),
+    expand = c(0,0)
+  ) +
+  guides(x = "none") +
+  theme(
+    aspect.ratio = NULL,
+    panel.grid.major = element_blank(),
+    axis.line = element_blank(),
+    axis.title.x = element_blank(),
+    axis.ticks.y = element_line(colour = "transparent"),
+    axis.text.y.left = element_text(hjust = 1),
+    plot.margin = margin(0,0,0,0)
+  ) +
+  coord_cartesian(clip = "off"); upsetbit
+```
+
+
+```{r}
+pw <- ((mosaic + theme(plot.margin = margin(0,5.5,0,0),
+                      aspect.ratio = NULL)) | (barbit / upsetbit) + plot_layout(heights = c(2, 1))) + 
+  plot_layout(widths = c((1 + sqrt(5))/2, 1)) &
+  plot_annotation(theme = theme(plot.margin = margin(0,0,0,0)))
+
+ggsave(
+  here("figures", "manuscript", "Fig1_cell_peak_stats.svg"), plot = pw,
+  device = svglite::svglite, width = 110.3, height = 50, unit = "mm",
+  fix_text_size = FALSE
+)
+```
+
+## Progenitor motifs
+
+```{r}
+motifs <- altExp(exp, "motifs")
+
+moi <- c("OCT4::SOX2" = "Pou5f1::Sox2", 
+         "TCF3" = "TCF3", "CDX2" = "CDX2",
+         "MSGN1" = "MSGN1", "TBX6" = "TBX6",
+         "TBXT" = "TBXT")
+
+o <- setNames(order(
+  factor(as.character(clust), levels = c("C", "B", "A", "D", "E", "F", "G", "H")),
+  -exp$diffusion$dpt3
+), exp$alias)
+
+dat <- assay(motifs, "zscore")[match(moi, rowData(motifs)$name), o]
+oo <- match(colnames(dat), exp$alias)
+
+anno <- data.table(
+  x = seq_along(colnames(dat)),
+  value = clust[oo]
+)
+anno <- anno[, .(xmin = min(x), xmax = max(x)), by = "value"]
+anno$zoom <- FALSE
+zoomlim <- unlist(anno[value == "A", c(xmin, xmax)])
+
+rownames(dat) <- names(moi)
+dat <- reshape2::melt(as.matrix(dat))
+# dat$Var1 <- as.numeric(dat$Var1)
+dat$Var2 <- as.numeric(dat$Var2)
+dat$Var1 <- match(dat$Var1, names(moi))
+# dat$zoom <- dat$Var2 >= zoomlim[1] & dat$Var2 <= zoomlim[2]
+
+# ranges <- vapply(split(anno$Var2, anno$value), range, c(1,2))
+binsize <- 5
+setDT(dat)
+dat[, Var2 := ((Var2 %/% binsize) + 1) * binsize]
+dat <- dat[, value := mean(value), by = c("Var1", "Var2")]
+
+relsizes <- length(moi) / (length(moi) + 0.5)
+
+motif_hmap <- ggplot(dat, aes(Var2, Var1)) +
+    # geom_tile(aes(fill = value)) +
+  geom_raster(aes(fill = value)) +
+  scale_fill_gradientn(
+    colours = c("#0065b2", "#2399de", "#67cdfe", "#f5f5f5",
+                "#fcb09d", "#ed6855", "#be2a21"),
+    rescaler = ~ rescale_mid(.x, mid = 0),
+    limits = c(-3, 3), oob = oob_squish,
+    breaks = c(-2, 0, 2), labels = c("\u22122", "0", "+2"),
+    name = "Motif\nZ-score",
+    guide = guide_colourbar(
+      barheight = unit(relsizes * 2, "cm"),
+      barwidth = unit(2.5, "mm")
+    )
+  ) +
+  ggnewscale::new_scale_fill() +
+  geom_rect(
+    data = anno,
+    aes(fill = value, 
+        xmin = xmin - 0.5, xmax = xmax + 0.5,
+        ymin = length(moi) + 0.5, ymax = length(moi) + 1),
+    inherit.aes = FALSE
+  ) +
+  scale_fill_manual(
+    values = clust_colour, guide = "none"
+  ) +
+  scale_y_continuous(
+    name = NULL,
+    breaks = seq_along(moi),
+    labels = names(moi),
+    expand = c(0,0,0,0),
+    guide = guide_axis_truncated(trunc_upper = length(moi) + 0.5, 
+                                 trunc_lower = -Inf)
+  ) +
+  scale_x_continuous(
+    expand = c(0, 0),
+    guide = "none", name = NULL
+  ) +
+  ggforce::facet_zoom(
+    xlim = zoomlim,
+    zoom.size = 1, horizontal = FALSE) +
+  force_panelsizes(rows = unit(2 * c(1, relsizes), "cm")) +
+  theme(strip.background = element_rect(fill = "grey50", colour = NA),
+        legend.text.align = 1,
+        legend.justification = "bottom",
+        legend.box.margin = margin(0,0,0,0),
+        legend.margin = margin(0,0,0,0),
+        plot.margin = margin(0,0,0,0),
+        panel.grid.major = element_blank())
+motif_hmap
+```
+
+```{r}
+ggsave(
+  here("figures", "manuscript", "Fig1_Motif_Heatmap.svg"), plot = motif_hmap,
+  device = svglite::svglite, width = 85 + 5.954 + 5.23, height = 50, unit = "mm",
+  fix_text_size = FALSE
+)
+```
+
+
+```{r}
+library(TxDb.Mmusculus.UCSC.mm10.knownGene)
+tss <- genes(TxDb.Mmusculus.UCSC.mm10.knownGene)
+tss <- resize(tss, 1)
+
+dist2near <- distanceToNearest(stats$ranges, tss)
+rs <- rowSums(pos_sets)
+
+df <- data.frame(
+  dist   = mcols(dist2near)$distance,
+  is_set = rs > 0 
+)
+
+breaks <- c(-Inf, 100, 500, 1e3, 2e3, 4e3, 8e3, 16e3, 32e3, 64e3, 125e3, 250e3,
+            500e3, 1000e3, Inf)
+
+setDT(df)
+df[, cut := cut(dist, breaks = breaks)]
+df2 <- df[, .(DA = sum(is_set), nDA = sum(!is_set)), by = cut]
+df2 <- df2[order(cut)]
+df2[, DA := DA / sum(DA)]
+df2[, nDA := nDA / sum(nDA)]
+
+df2 <- df2[rep(seq_len(nrow(df2)), each = 2)]
+df2[, xpos := as.numeric(cut) + c(-1, 1) * 0.5]
+df2 <- rbind(copy(df2[1])[, DA := 0][, nDA := 0], df2)
+df2 <- rbind(df2, copy(df2[nrow(df2)])[, DA := 0][, nDA := 0])
+
+df2 <- melt.data.table(df2, measure.vars = c("DA", "nDA"))
+df2$variable <- forcats::fct_rev(df2$variable)
+
+distplot <- ggplot(df2, aes(xpos, value, colour = variable)) +
+  geom_area(
+    aes(fill = variable),
+    position = "identity", alpha = 0.5
+  ) +
+  geom_text(
+    data = df2[order(-xpos), .SD[which.max(value)], by = "variable"],
+    aes(label = paste0(variable, " peaks"),
+        colour = stage(variable, after_scale = darken(colour))),
+    nudge_x = 0.25, hjust = 0, vjust = 1,
+    show.legend = FALSE
+  ) +
+  scale_colour_manual(
+    aesthetics = c("fill", "colour"),
+    values = rev(c("#ff5c49", "#949494")),
+    guide = "none"
+  ) +
+  scale_y_continuous(
+    name = "Fraction of peak group",
+    expand = c(0, 0, 0.1, 0)
+  ) +
+  scale_x_continuous(
+    breaks = seq_along(breaks) - 0.5,
+    labels = c(0, number(breaks[-1], scale_cut = cut_si("b"))),
+    name = "Distance to nearest TSS",
+    guide = guide_axis(n.dodge = 2)
+  ) +
+  theme(
+    legend.position = c(1, 1),
+    legend.justification = c(1, 1),
+    panel.grid.major.x = element_blank(),
+    aspect.ratio = NULL
+  ) +
+  force_panelsizes(
+    cols = unit(58.424, "mm"),
+    rows = unit(34.075, "mm")
+  )
+distplot
+```
+
+```{r}
+ggsave(
+  here("figures", "manuscript", "FigS1_DA_distance.svg"), plot = distplot,
+  device = svglite::svglite, width = 70, height = 50, unit = "mm",
+  fix_text_size = FALSE
+)
+```
+
+
+## References
+
+<div id="refs"></div>
+
+## Session Info
+
+<p>
+  <a class="btn btn-primary" data-toggle="collapse" href="#sinfo" role="button" aria-expanded="false" aria-controls="sinfo">
+    View
+  </a>
+</p>
+<div class="collapse" id="sinfo">
+  <div class="card card-body">
+
+```{r session_info, include=TRUE, echo=FALSE, results = "asis"}
+pkgs <- loadedNamespaces()
+libTvdB::format_sessioninfo_html(pkgs)
+```
+
+  </div>
+</div>

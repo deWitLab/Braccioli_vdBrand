@@ -1,0 +1,184 @@
+---
+title: "Untitled"
+author: 
+  - name: "Teun van den Brand"
+    email: "t.vd.brand@nki.nl"
+    affiliation: "Netherlands Cancer Institute"
+date: '`r format(Sys.time(), "%d/%m/%Y")`'
+output: 
+  html_document:
+    theme: united
+    highlight: pygments
+    fig_caption: yes
+    code_folding: hide
+    df_print: kable
+    toc: true
+    toc_depth: 4
+    toc_float:
+      collapsed: false
+bibliography: /DATA/users/t.vd.brand/bibliography/articles.bibtex
+knit: |
+  # Redirect output to HTML folder
+  (function(inputFile, encoding) {
+    outputFile <- gsub("Rmd$", "html", basename(inputFile))
+    rmarkdown::render(
+      input = inputFile,
+      encoding = encoding,
+      output_file = here::here("html", outputFile)
+    )
+  })
+---
+
+## Setup {.tabset}
+
+<!-- little HTML script to do indentation of the table of contents -->
+<script>
+    $(document).ready(function() {
+      $items = $('div#TOC li');
+      $items.each(function(idx) {
+        num_ul = $(this).parentsUntil('#TOC').length;
+        $(this).css({'text-indent': num_ul * 10, 'padding-left': 0});
+      });
+
+    });
+</script>
+
+```{css, echo = FALSE}
+div.sourceCode {
+  overflow-x: hidden;
+}
+```
+
+### Load packages
+
+```{r stfu, include = FALSE}
+# No, I do *not* want your start-up messages, thank you very much
+library <- function(...) {
+  suppressPackageStartupMessages(base::library(...))
+}
+```
+
+
+```{r load_packages}
+library(here)
+library(SingleCellExperiment)
+library(ggplot2)
+library(scales)
+library(ggh4x)
+source(here("rscripts", "project_functions_plotting.R"))
+```
+
+### Load data
+
+```{r load_data}
+vliet <- readRDS(here("rds", "XX_veenvliet2020_sce_preprocessed.rds"))
+
+```
+
+## Aim
+
+```{r}
+symbols <- rowData(vliet)$gene_symbol
+goi <- c("Cdx1", "Cdx2", "Cdx4",
+         "Rfx1", "Rfx2", "Rfx3", "Rfx4", "Rfx5", "Rfx7", "Rfx8",
+         paste0("Sox", c(1:15, 17, 18, 21, 30)),
+         "Twist1", "Twist2", "Msgn1")
+i <- match(goi, symbols)
+
+vals <- as.matrix(assay(vliet, "counts")[i, ])
+vals <- sweep(vals, 2, vliet$sizeFactor, FUN = "/")
+rownames(vals) <- goi
+
+clusts <- vliet$cluster
+clusts <- vapply(sort(unique(clusts)), function(x) {clusts == x}, 
+                 logical(length(clusts)))
+
+tab <- table(vliet$cluster)
+
+ncells <- crossprod(t(vals > 0), clusts)
+ncells <- sweep(ncells, 2, as.vector(tab), FUN = "/")
+ncells <- reshape2::melt(ncells)
+
+sums <- crossprod(t(vals), clusts)
+sums <- sweep(sums, 1, rowSums(sums), FUN = "/")
+sums <- reshape2::melt(sums)
+
+ncells$avg <- sums$value
+ncells$Var2 <- as.character(ncells$Var2)
+
+ord <- c(
+  "NeuralTube2", "NeuralTube1", "NMPs", "pPSM", "aPSM",
+  "Somite-1", "Somite0", "Somite", "SomiteSclero", "SomiteDermo",
+  "Endothelial", "Endoderm", "PCGLC", "Unknown"
+)
+ncells$Var2 <- factor(ncells$Var2, levels = ord)
+levels(ncells$Var2)[c(6:10)] <- c("Somite (-1)", "Somite (0)", "Somite",
+                                  "Somite (Sclero)", "Somite (Dermo)")
+levels(ncells$Var2)[c(13)] <- "PGCLC"
+ord <- levels(ncells$Var2)
+
+ncells$gene_num <- gsub("[A-Za-z]+", "", as.character(ncells$Var1))
+ncells$gene_fam <- gsub("[0-9]+", "", as.character(ncells$Var1))
+ncells$gene_num <- factor(ncells$gene_num, 1:30)
+
+p <- ggplot(ncells, aes(gene_num, Var2)) +
+  geom_outline_point(
+    aes(size = value, colour = avg), stroke_colour = "white"
+  ) +
+  colorspace::scale_colour_continuous_sequential(
+    palette = "Reds",
+    name    = "Reads",
+    labels  = percent_format(),
+    breaks  = seq(0, 1, by = 0.2),
+    limits  = c(0, 1),
+    guide   = guide_colourbar(barheight = unit(14 * 8, "pt"),
+                              barwidth  = unit(2.5, "mm"))
+  ) +
+  scale_size_area(
+    limits = c(0, 1), max_size = 3.3,
+    breaks = seq(0, 1, by = 0.2),
+    labels = percent_format(),
+    name   = "Cells", 
+    oob    = oob_keep,
+    guide  = guide_legend(reverse = TRUE, override.aes = list(colour = "black"))
+  ) +
+  scale_y_discrete(
+    name   = "Cell type",
+    limits = rev(ord)
+  ) +
+  scale_x_discrete(
+    name = NULL
+  ) +
+  facet_grid2(~ gene_fam, scales = "free_x", space = "free_x",
+              switch = "x", strip = strip_vanilla(clip = "off")) +
+  force_panelsizes(
+    cols = unit(c(3,1,7,19) * 8, "pt"),
+    rows = unit(14 * 8, "pt"), respect = TRUE
+  ) +
+  theme(
+    aspect.ratio = NULL,
+    strip.placement = "outside",
+    strip.background.x = ggh4x::element_part_rect(side = "t"),
+    legend.box = "horizontal"
+  )
+p
+```
+```{r}
+ggsave(
+  here("figures", "manuscript", "FigSX_Expression_Bubbles.svg"), plot = p,
+  device = svglite::svglite, width = 160, height = 100, unit = "mm",
+  fix_text_size = FALSE
+)
+```
+
+
+## References
+
+<div id="refs"></div>
+
+## Session Info
+
+```{r session_info, include=TRUE, echo=FALSE, results = "asis"}
+pkgs <- loadedNamespaces()
+libTvdB::format_sessioninfo_html(pkgs)
+```

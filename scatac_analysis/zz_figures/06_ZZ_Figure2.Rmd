@@ -1,0 +1,714 @@
+---
+title: "Figure 2"
+author: 
+  - name: "Teun van den Brand"
+    email: "t.vd.brand@nki.nl"
+    affiliation: "Netherlands Cancer Institute"
+date: '`r format(Sys.time(), "%d/%m/%Y")`'
+output: 
+  html_document:
+    theme: united
+    highlight: pygments
+    fig_caption: yes
+    code_folding: hide
+    df_print: kable
+    toc: true
+    toc_depth: 4
+    toc_float:
+      collapsed: false
+bibliography: /DATA/users/t.vd.brand/bibliography/articles.bibtex
+---
+
+## Setup {.tabset}
+
+<!-- little HTML script to do indentation of the table of contents -->
+<script>
+    $(document).ready(function() {
+      $items = $('div#TOC li');
+      $items.each(function(idx) {
+        num_ul = $(this).parentsUntil('#TOC').length;
+        $(this).css({'text-indent': num_ul * 10, 'padding-left': 0});
+      });
+
+    });
+</script>
+
+```{css, echo = FALSE}
+div.sourceCode {
+  overflow-x: hidden;
+}
+```
+
+### Load packages
+
+```{r load_packages, results = 'hide', warning = FALSE, message = FALSE}
+library(ggplot2)
+library(scales)
+library(here)
+library(SingleCellExperiment)
+library(ggrepel)
+library(ggh4x)
+library(ggnewscale)
+library(colorspace)
+library(rtracklayer)
+library(tornadoplot)
+library(data.table, exclude = "shift")
+library(ggrastr)
+source(here("rscripts", "project_functions_plotting.R"))
+```
+
+### Load data
+
+```{r load_data}
+experiment <- here("rds", "06_emb_gas_processed_exp.rds")
+exp <- readRDS(experiment)
+gast <- readRDS(here("rds", "06_LSI_experiment.rds"))
+stats <- readRDS(here("rds", "06_peak_statistics.rds"))
+emb_meta <- readxl::read_xlsx("/DATA/users/t.vd.brand/projects/mouse_embryo/external_data/sciatac/metadata/41556_2020_489_MOESM3_ESM.xlsx")
+emb_colours <- setNames(emb_meta$colour, emb_meta$ann)
+emb_colours <- emb_colours[!duplicated(emb_colours)]
+
+bigwig_files <- list.files(
+  here("data_raw", "external", "pijuansala2020", "bigwigs"),
+  pattern = "\\.bw$", full.names = TRUE
+)
+bigwig_files <- setNames(
+  bigwig_files,
+  gsub("\\.bw$", "", basename(bigwig_files))
+)
+bigwig_files <- c(
+  bigwig_files,
+  mESC = "/DATA/projects/gastruloids/processed_data/bulkatac/bigwig/22_LB_WT-E14_GTAGAGGA-CTCTCTAT_S22.bw"
+)
+
+bw_gast <- list.files(
+  here("data_raw", "bigwig"),
+  pattern = "^06_Cluster_", full.names = TRUE
+)
+bw_gast <- setNames(
+  bw_gast,
+  gsub("^06_Cluster_|\\.bw$", "", basename(bw_gast))
+)
+bw_gast <- BigWigFileList(bw_gast[-length(bw_gast)])
+```
+
+## Aim
+
+Make figure 2 for the manuscript
+
+## Embryo comparison
+
+```{r}
+df <- data.frame(
+  x = reducedDim(exp, "UMAP")[, 2],
+  y = reducedDim(exp, "UMAP")[, 1],
+  embryo_clust = exp$clust_embryo,
+  gastru_clust = exp$clust_gastruloid
+)
+
+keep <- !(rownames(df) %in% gast$alias[gast$batch == "KOs"])
+df <- df[keep,]
+
+df$embryo_clust <- gsub(" ", "\n", as.character(df$embryo_clust))
+names(emb_colours) <- gsub(" ", "\n", names(emb_colours))
+
+label_gastruloid <- c("Spinal cord", "Pharyngeal mesoderm", 
+                      "Somitic mesoderm", "NMP", "Paraxial mesoderm",
+                      "Endothelium")
+lab_gas <- gsub(" ", "\n", as.character(label_gastruloid))
+
+colours <- metadata(gast$clusters)$colours
+df <- df[sample(nrow(df)),]
+
+edge_colour <- function(x, value = 0.3) {
+  colorspace::darken(x, 1 - value)
+}
+
+df$gastru_clust <- factor(
+  df$gastru_clust, LETTERS[1:8],
+  c("Prog", "NMP", "SC", "SMD", "PxMD", "PhMD", "Enth", "Endo")
+)
+
+olay <- ggplot(df, aes(x, y)) +
+  rasterise(
+    geom_outline_point(
+      data = ~ cbind(.x, facet = "Embryo")[order(!is.na(.x$embryo_clust)), ],
+      aes(colour = embryo_clust,
+          stroke_colour = after_scale(edge_colour(colour_new))),
+      size = 0.5
+    ), dpi = 300, dev = "ragg"
+  ) +
+  scale_colour_manual(
+    values = emb_colours, guide = "none"
+  ) +
+  new_scale_colour() +
+  rasterise(
+    geom_outline_point(
+      data = ~ cbind(.x, facet = "Gastruloid")[order(!is.na(.x$gastru_clust)), ],
+      aes(colour = gastru_clust,
+          stroke_colour = after_scale(edge_colour(colour))),
+      size = 0.5
+    ), dpi = 300, dev = "ragg"
+  ) +
+  stat_centroid(
+    data = ~ cbind(subset(.x, !is.na(embryo_clust)), facet = "Embryo"),
+    aes(group = embryo_clust, label = embryo_clust),
+    geom = "text_repel", size = 2, lineheight = 0.8,
+    min.segment.length = 0, max.overlaps = 20,
+    box.padding = 0.35, funx = median, funy = median
+  ) +
+  stat_centroid(
+    data = ~  cbind(subset(.x, !is.na(embryo_clust) & 
+                       embryo_clust %in% lab_gas),
+                    facet = "Gastruloid"),
+    aes(group = embryo_clust, label = embryo_clust),
+    geom = "text_repel", size = 2, lineheight = 0.8,
+    min.segment.length = 0, max.overlaps = 20,
+    box.padding = 0.35, funx = median, funy = median
+  ) +
+  scale_colour_manual(
+    values = colours, na.value = "grey50",
+    guide = guide_legend(override.aes = list(size = 2)),
+    breaks = levels(df$gastru_clust), name = "Gastruloid\nCluster"
+  ) +
+  scale_x_continuous(name = "UMAP 1", breaks = NULL) +
+  scale_y_continuous(name = "UMAP 2", breaks = NULL) +
+  facet_grid(facet ~ ., switch = "y") +
+  coord_equal() +
+  theme(aspect.ratio = NULL,
+        strip.text = element_text(hjust = 1),
+        legend.position = "bottom",
+        legend.background = element_blank(),
+        legend.justification = "right",
+        legend.key.size = unit(0.5, "lines"),
+        legend.box.margin = margin(0,0,0,0),
+        legend.box.spacing = unit(2.75, "pt"),
+        legend.margin = margin(0,0,0,0),
+        plot.margin = unit(c(0,0,0,0), "pt"),
+        strip.placement = "outside")
+olay
+```
+
+```{r}
+ggsave(
+  here("figures", "manuscript", "Fig2_Embryo_overlay.svg"), plot = olay,
+  device = svglite::svglite, width = 85 + 0.889, height = 180, units = "mm",
+  fix_text_size = FALSE
+)
+```
+
+## Example loci
+
+<!-- # NMPs -->
+<!-- Stra6l  : chr4:45,838,370-45,886,623 -->
+<!-- Cdx2    : chr5:147,296,505-147,311,967 -->
+<!-- Nkx1-2  : chr7:132,590,990-132,619,954 -->
+<!-- Cyp26a1 : chr19:37,681,934-37,744,539 -->
+<!-- Greb1   : chr12:16,737,806-16,821,433 -->
+<!-- Fam222a : chr5:114,538,850-114,577,824 -->
+<!-- Sema3a  : chr5:13,078,978-13,441,618 -->
+
+<!-- # NT: -->
+<!-- Scube2 : chr7:109,792,243-109,879,998 -->
+<!-- Sox21  : chr14:118,198,718-118,387,604 -->
+<!-- Rfx4   : chr10:84,667,240-84,785,755 -->
+<!-- Sox1   : chr8:12,373,169-12,436,623 -->
+<!-- Nrcam  : chr12:44,303,011-44,447,540 -->
+<!-- Ednrb  : chr14:103,796,973-103,909,363 -->
+<!-- Pax6   : chr2:105,578,222-105,724,562 -->
+<!-- Cdh6   : chr15:13,150,132-13,231,415 -->
+<!-- Irx5   : chr8:92,093,534-92,403,316 -->
+<!-- Sox2   : chr3:34,529,101-34,701,464 -->
+<!-- Sox13  : chr1:133,379,995-133,498,618 -->
+<!-- Sfrp2  : chr3:83,750,453-83,803,367 -->
+<!-- Mycl   : chr4:122,981,745-123,030,871 -->
+<!-- Akap16 : chr10:4,235,071-4,283,935 -->
+<!-- Id2    : chr12:25,076,976-25,130,914 -->
+
+<!-- # Mesoderm branch: -->
+<!-- Meox1  : chr11:101,865,839-101,925,789 -->
+
+<!-- # SMD -->
+<!-- Gstm5   : chr3:107,893,252-107,905,335 -->
+<!-- Ripply2 : chr9:86,972,362-87,028,505 -->
+<!-- Kcnn3   : chr3:89,507,693-89,593,916 -->
+<!-- Synm    : chr7:67,735,024-67,773,575 -->
+<!-- Lef1    : chr3:131,071,065-131,135,142 -->
+<!-- Notch1  : chr2:26,469,891-26,519,813 -->
+<!-- Rnd3    : chr2:51,129,242-51,250,684 -->
+<!-- Tbx6    : chr7:126,773,337-126,793,475 -->
+<!-- Mir1932 : chr11:119,348,642-119,399,480 -->
+<!-- Dll1    : chr17:15,358,076-15,388,488 -->
+<!-- Dll3    : chr7:28,288,289-28,315,300 -->
+<!-- Cited1  : chrX:102,229,500-102,324,225 -->
+<!-- Frzb    : chr2:80,437,134-80,464,509 -->
+<!-- Snai1   : chr2:167,526,912-167,554,287 -->
+<!-- Msgn1   : chr12:11,203,386-11,222,323 -->
+
+<!-- # PxMD & PhMD -->
+<!-- Flrt2 : chr12:95,621,922-95,702,365 -->
+<!-- Mrc2  : chr11:105,275,168-105,321,153 -->
+
+<!-- # PxMD -->
+<!-- Fap    : chr2:62,511,731-62,588,816 -->
+<!-- Meox2  : chr12:36,887,990-37,132,336 -->
+<!-- Cxcl12 : chr6:117,151,668-117,228,749 -->
+<!-- Bmp3   : chr5:98,812,564-98,872,721 -->
+<!-- Foxd2  : chr4:114,830,298-114,935,429 -->
+<!-- Dmrt2  : chr19:25,646,651-25,684,874 -->
+<!-- Islr   : chr9:58,149,141-58,169,000 -->
+<!-- Twist2 : chr1:91,777,245-91,883,734 -->
+
+
+<!-- # PhMD -->
+<!-- Prdm1: chr10:44,425,173-44,498,652 -->
+<!-- Gata6: chr18:10,889,141-11,089,070 -->
+<!-- Rgs5 : chr1:169,641,481-169,701,951 -->
+<!-- Tbx1 : chr16:18,544,541-18,616,196 -->
+<!-- Mme  : chr3:63,283,617-63,309,851 -->
+<!-- Alx1 : chr10:102,986,507-103,044,487 -->
+
+<!-- # Endo -->
+<!-- Kdr    : chr5:75,927,803-75,986,477 -->
+<!-- Sparc  : chr11:55,384,490-55,424,258 -->
+<!-- Cldn5  : chr16:18,755,637-18,807,151 -->
+<!-- Icam2  : chr11:106,371,622-106,395,806 -->
+<!-- Ctla2a : chr13:60,932,155-60,938,625 -->
+<!-- Sox18  : chr2:181,656,801-181,677,252 -->
+<!-- Etv2   : chr7:30,631,616-30,637,852 -->
+
+```{r}
+loci <- c(
+  # "Lefty2" = "chr1:180878574-180910342", # Clust F
+  "Rspo3" = "chr10:29516392-29572367", # Clust D
+  "Meox1" = "chr11:101876121-101915803", # Clust E
+  "Olig2" = "chr16:91167161-91236829" # Clust C,
+  # "Tbx1"  = "chr16:18543318-18602093", # Clust B,
+  # "Hoxb9" = "chr11:96256375-96291033" # Clust G
+)
+loci <- GRanges(loci)
+start(loci) <- round(start(loci), -4)
+end(loci) <- round(end(loci), -4)
+
+binwidth <- 100
+tracks <- lapply(bw_gast, function(bw) {
+  dat <- summary(bw, which = loci, size = ceiling(width(loci) / binwidth),
+                 as = "GRangesList", type = "mean")
+  dat <- lapply(dat, function(d) {
+    mid <- mid(d)
+    data.frame(
+      x = c(min(mid), mid, max(mid)),
+      y = c(0, score(d), 0)
+    )
+  })
+  data.table::rbindlist(setNames(dat, names(loci)), idcol = "locus")
+})
+tracks <- data.table::rbindlist(tracks, idcol = "clust")
+
+tracks[, y_scaled := rescale(y, to = c(0, 0.95)), by = "locus"]
+tracks$clust_match <- match(tracks$clust, names(bw_gast))
+tracks[, y_shift := y_scaled + 7 - clust_match]
+
+ylim <- tracks[, max(y), by = "locus"]
+ylim <- setNames(ylim$V1, ylim$locus)
+nice_ylim_labs <- setNames(c(25, 25, 40, 25, 20, 35), names(ylim))
+nice_ylim_breaks <- (nice_ylim_labs / ylim) * 0.95
+
+xlim <- tracks[, range(x), by = "locus"]
+
+breaks <- c(0, rep(0.95, ))
+breaks <- rep(c(0, 0.95), 7) + rep(0:7, each = 2)
+labels <- c(0, rep("", 7))
+
+# y_scales <- lapply(setNames(nm = names(loci)), function(locus) {
+#   scale_y_continuous(
+#     expand = c(0, 0),
+#     breaks = c(0, rep(nice_ylim_breaks[locus], 7) + 0:6),
+#     labels = c(labels, nice_ylim_labs[locus]) ,
+#     limits = c(0, 6.95),
+#     guide = guide_axis_truncated(trunc_lower = 0:6,
+#                                  trunc_upper = 0:6 + 0.9)
+#   )
+# })
+
+x_scales <- lapply(split(xlim$V1, xlim$locus), function(lim) {
+  scale_x_continuous(
+    breaks = min,
+    labels = NULL, expand = c(0,0),
+    limits = lim
+  )
+})
+x_scales$Rspo3 <- scale_x_continuous(
+  labels = NULL, breaks = min,
+  expand = c(0, 0), limits = xlim$V1[1:2],
+  sec.axis = sec_axis(
+    trans = ~.x,  
+    guide = guide_axis_scalebar(size = 5e3, label = "5kb")
+  )
+)
+xlabs <- paste0(
+  decode(seqnames(loci)), ":",
+  number(start(loci), big.mark = ","), "-", number(end(loci), big.mark = ",")
+)
+names(xlabs) <- names(loci)
+
+x_scales$Meox1$labels <- xlabs[["Meox1"]]
+x_scales$Olig2$labels <- xlabs[["Olig2"]]
+x_scales$Rspo3$labels <- xlabs[["Rspo3"]]
+
+facet_lvls <- c("", "Average accessibility (%)")
+
+genes <- retrieve_ncbi_genemodel(loci, names(loci),
+                                 facet = factor(facet_lvls[[1]], facet_lvls))
+
+```
+
+
+
+
+### Alternative
+
+```{r}
+alt <- copy(tracks)
+alt[, trim := y > 30]
+alt[, y_trim := pmin(y, 30)]
+alt[, y_scaled := rescale(y_trim, to = c(0, 0.95))]
+alt$clust_match <- match(tracks$clust, names(bw_gast))
+alt[, y_shift := y_scaled + 7 - clust_match]
+
+tick <- rescale(25, to = c(0, 0.95), from = c(0, 30))
+
+y_scale <- scale_y_continuous(
+  expand = c(0,0),
+  breaks = c(0, tick + 1 * 0:6),
+  labels = function(x) {
+    c(0, rep('"', length(x) - 2), "25")
+  },
+  limits = c(0, 6.95),
+  guide = guide_axis_truncated(
+    trunc_lower = 0:6,
+    trunc_upper = 0:6 + tick
+  )
+)
+
+labels <- data.frame(
+  clust = LETTERS[1:7],
+  label = c("Prog", "NMP", "SC", "SMD", "PxMD", "PhMD", "Enth"),
+  x = 101881000,
+  y_shift = 6:0 + tick,
+  locus = "Meox1",
+  facet = facet_lvls[2]
+)
+
+alt_plot <- ggplot(tracks, aes(x, y_shift)) +
+  geom_polygon(
+    data = ~ cbind(.x, facet = factor(facet_lvls[2], facet_lvls)),
+    aes(fill = clust, colour = after_scale(darken(fill, 0.3))),
+    size = 0.25
+  ) +
+  geom_hline(
+    data = data.frame(facet = facet_lvls[2], brk = 0:6),
+    aes(yintercept = brk)
+  ) +
+  geom_genemodel_rects(genes, thin = 0.5, thick = 0.5) +
+  geom_text(
+    data = labels,
+    aes(label = label, colour = clust),
+    hjust = 0, vjust = 1
+  ) +
+  scale_fill_manual(
+    aesthetics = c("colour", "fill"),
+    values = colours, name = "Cluster",
+    guide = "none"
+  ) +
+  scale_x_continuous(
+    breaks = breaks_width(10000), 
+    labels = NULL, expand = c(0,0)
+  ) +
+  facet_grid2(
+    vars(facet), vars(locus),
+    scales = "free", space = "free_x",
+    switch = "y", axes = "y", remove_labels = "y",
+    strip = strip_themed(
+      clip = "off",
+      text_y = elem_list_text(angle = c(0, 90), vjust = c(0.5, 0))
+    )
+  ) +
+  facetted_pos_scales(
+    y = list(
+      facet == "" ~ scale_y_continuous(limits = c(-2, 2), guide = "none"),
+      TRUE ~ y_scale
+    ),
+    x = x_scales[c("Meox1", "Olig2", "Rspo3")]
+  ) +
+  labs(y = NULL, x = NULL) +
+  force_panelsizes(
+    rows = unit(c(0.5, 5.25), "cm")
+  ) +
+  theme(
+    aspect.ratio = NULL,
+    panel.grid.major   = element_blank(),
+    strip.placement    = "outside",
+    axis.line.y.right  = element_blank(),
+    axis.ticks.y.right = element_blank(),
+    axis.text.y.right  = element_text(vjust = 0, face = "bold"),
+    axis.text.y.left   = element_text(hjust = 1, margin = margin(r = 2.2, l = 2.2)),
+    strip.background.x = element_part_rect(side = "b", colour = "black", fill = NA),
+    strip.text.y.left  = element_text(colour = NA),
+    axis.ticks.length.x.top = unit(-1, "cm"),
+    axis.ticks.length.x.bottom = unit(0, "pt"),
+    axis.ticks.x.bottom = element_blank(),
+    axis.text.x.bottom = element_text(hjust = 0),
+    axis.line.x.top = element_blank(),
+    plot.margin = unit(c(0,0,0,0), "pt")
+  )
+alt_plot
+```
+
+```{r}
+ggsave(
+  here("figures", "manuscript", "Fig2_Example_Loci.svg"), plot = alt_plot,
+  device = svglite::svglite, width = 172 + 8.203, height = 86, units = "mm",
+  fix_text_size = FALSE
+)
+```
+
+## Tornados
+
+```{r}
+thres_pvalue <- 0.05
+thres_effect <- log(1.5)
+
+peaks <- stats$ranges
+peaks <- GenomicRanges::shift(resize(peaks, 1, fix = "start"), peaks$peak)
+
+clust_groups <- sort(unique(gast$clusters$cluster))
+clust_groups <- setNames(nm = clust_groups)
+
+pvalue_columns <- colnames(stats)[grepl("_pvalue$", colnames(stats))]
+pvalue_columns <- setNames(
+  pvalue_columns,
+  gsub("^cluster_|_pvalue$", "", pvalue_columns)
+)
+effect_columns <- colnames(stats)[grepl("_estimate$", colnames(stats))]
+effect_columns <- setNames(
+  effect_columns,
+  gsub("^cluster_|_estimate$", "", effect_columns)
+)
+
+peak_groups <- lapply(clust_groups, function(i) {
+  pvalue <- p.adjust(stats[[pvalue_columns[i]]], "fdr")
+  effect <- stats[[effect_columns[i]]]
+  pick <- which(pvalue < thres_pvalue & effect > thres_effect)
+  peaks[pick]
+})
+peak_groups <- as(peak_groups, "GRangesList")
+peak_groups$H <- NULL
+```
+
+```{r}
+bws <- bigwig_files[c("Endothelium", "NMP", "Somitic_mesoderm",
+                      "Spinal_cord", "Paraxial_mesoderm",
+                      "Pharyngeal_mesoderm", "mESC")]
+bws <- BigWigFileList(bws)
+
+tor <- build_tornado(peak_groups, bws)
+tor <- sort_tornado(tor)
+
+scale <- scale_fill_continuous_sequential(
+  palette = "PuBu",
+  limits  = c(0, 30), oob = oob_squish,
+  labels  = number_format(accuracy = 1),
+  name    = "RPGC",
+  breaks  = breaks_width(10),
+  guide   = guide_colourbar(barwidth = unit(30, "mm"),
+                            barheight = unit(2.5, "mm"),
+                            title.position = "left", title.hjust = 1,
+                            title.vjust = 0.5)
+)
+
+dat <- prep_tornado(tor, scale = scale)
+dat$sample <- gsub("_", "\n", as.character(dat$sample))
+dat$sample <- factor(
+  dat$sample,
+  levels = c("mESC", "NMP", "Spinal\ncord", "Somitic\nmesoderm",
+             "Paraxial\nmesoderm", "Pharyngeal\nmesoderm", "Endothelium")
+)
+levels(dat$sample) <- c(
+  "mESC", "NMP", "NT", "SMD", 
+  "PxMD", "PhMD", "Enth"
+)
+
+dat$feature_set <- factor(
+  dat$feature_set, LETTERS[1:7],
+  c("Prog", "NMP", "SC", "SMD", "PxMD", "PhMD", "Enth")
+)
+```
+
+
+```{r}
+torplot <- ggplot(data.frame(sample = factor(levels = levels(dat$sample)))) +
+  autolayer(dat) +
+  geom_rect(
+    data = data.frame(
+      feature_set = factor(levels(dat$feature_set), levels(dat$feature_set)), 
+      sample = factor(levels(dat$sample), levels(dat$sample))
+    ),
+    aes(xmin = -Inf, xmax = Inf, ymin = -Inf, ymax = Inf, colour = feature_set),
+    fill = NA
+  ) +
+  scale_x_continuous(
+    expand = c(0,0.5,0,0), breaks = c(-2000, -1000, 0, 1000, 2000),
+    labels = c("\u22122", "", "0", "", "+2")
+  ) +
+  scale_y_continuous(
+    expand = c(0,0),
+    breaks = force,
+    labels = function(x){c("\n", x[2] - 0.5)}
+  ) +
+  scale_colour_manual(
+    values = metadata(gast$clusters)$colours,
+    guide = "none"
+  ) +
+  facet_grid2(
+    "Gastruloid Peaks" + feature_set ~ "Embryonic Tissue" + sample,
+    scales = "free", space = "free_y", switch = "y",
+    strip = strip_nested(
+      clip = "off",
+      text_y = elem_list_text(angle = c(90, 90)),
+      by_layer_y = TRUE
+    )
+  ) +
+  facetted_pos_scales(
+    x = list(
+      COL == 1 ~   scale_x_continuous(
+        expand = c(0,0.5,0,0), breaks = c(-2000, -1000, 0, 1000, 2000),
+        labels = c("\u22122", "", "0", "", "+2")
+      ),
+      TRUE ~   scale_x_continuous(
+        expand = c(0,0.5,0,0), breaks = c(-2000, -1000, 0, 1000, 2000),
+        labels = c("", "", "", "", "")
+      )
+    )
+  ) +
+  force_panelsizes(cols = unit(8 + 0.21271428571428571428571428571429, "mm")) +
+  theme(aspect.ratio = NULL, strip.placement = "outside",
+        strip.text.x = element_text(vjust = 0),
+        legend.position = "bottom",
+        legend.justification = "right",
+        panel.spacing = unit(5.5, "pt"),
+        plot.margin = unit(c(0,0,0,0), "pt"),
+        strip.text.y.left = element_text(margin = margin(1,1,1,1), angle = 90),
+        axis.text.y.left = element_text(angle = 90, hjust = 1),
+        legend.box.spacing = unit(2.75, "pt"),
+        panel.grid.major = element_blank())
+torplot
+```
+
+
+```{r}
+ggsave(
+  here("figures", "manuscript", "Fig2_Tornado.svg"), plot = torplot,
+  device = svglite::svglite, width = 114, height = 120 + 34.128, units = "mm",
+  fix_text_size = FALSE
+)
+```
+
+## Other
+
+```{r}
+gast <- colData(gast)
+
+i <- match(gast$embryo$tissue, colnames(gast$embryo$probability), nomatch = 1)
+df <- data.frame(
+  clust = gast$clusters$cluster,
+  pred  = gast$embryo$tissue,
+  prob  = numeric(1)
+)
+df$prob <- gast$embryo$probability[cbind(seq_len(nrow(gast)), i)]
+order <- c(
+      "Spinal cord", "NMP", "Somitic mesoderm", "Paraxial mesoderm",
+      "Pharyngeal mesoderm", "Mixed mesoderm", "Mesenchyme", 
+      "Endothelium", "Gut", "Other", "Not included"
+    )
+
+setDT(df)
+df[!(pred %in% order), pred := "Other"]
+df <- df[, .(N = .N, avg_prob = mean(prob)), by = c("clust", "pred")]
+df[, prop := N / sum(N), by = "clust"]
+df$facet <- factor(rep("Main", nrow(df)), c("Main", "Legend"))
+
+p <- ggplot(df, aes(clust, pred)) +
+  geom_hline(
+    yintercept = seq(1.5, 10.5, by = 1), colour = "grey95", size = 0.25
+  ) +
+  geom_vline(
+    xintercept = seq(1.5, 7.5, by = 1), colour = "grey95", size = 0.25
+  ) +
+  geom_tile(
+    aes(fill = avg_prob, width = sqrt(prop), height = sqrt(prop))
+  ) +
+  geom_text(
+    aes(label = ifelse(prop > 0.1, percent(prop, 0.1), ""))
+  ) +
+  
+  colorspace::scale_fill_continuous_sequential(
+    palette = "Sunset",
+    name = "Average\nProbability",
+    limits = c(0, 1), oob = oob_squish, breaks = breaks_width(0.2),
+    guide = guide_colorbar(barwidth = unit(2.5, "mm"),
+                           barheight = unit(11/1.5, "cm"))
+  ) +
+  scale_y_discrete(
+    limits = rev(order),
+    name = NULL
+  ) +
+  scale_x_discrete(
+    labels = c("Prog", "NMP", "NT", "SMD", "PxMD", "PhMD", "Enth", "Endo"),
+    name = NULL
+  ) +
+  coord_equal() +
+  force_panelsizes(
+    rows = unit(11 / 1.5, "cm"), 
+    cols = unit(8 / 1.5, "cm"), 
+    respect = TRUE
+  ) +
+  theme(aspect.ratio = NULL,
+        strip.text.x = element_blank(),
+        panel.grid.major = element_blank())
+p
+```
+
+```{r}
+ggsave(
+  here("figures", "manuscript", "FigS2_Embryo_SVM.svg"), plot = p,
+  device = svglite::svglite, width = 114, height = 120, units = "mm",
+  fix_text_size = FALSE
+)
+```
+
+
+
+
+
+## References
+
+<div id="refs"></div>
+
+## Session Info
+
+<p>
+  <a class="btn btn-primary" data-toggle="collapse" href="#sinfo" role="button" aria-expanded="false" aria-controls="sinfo">
+    View
+  </a>
+</p>
+<div class="collapse" id="sinfo">
+  <div class="card card-body">
+
+```{r session_info, include=TRUE, echo=FALSE, results = "asis"}
+pkgs <- loadedNamespaces()
+libTvdB::format_sessioninfo_html(pkgs)
+```
+
+  </div>
+</div>

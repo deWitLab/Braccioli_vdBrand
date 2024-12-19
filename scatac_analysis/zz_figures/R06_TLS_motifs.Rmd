@@ -1,0 +1,364 @@
+---
+title: "Rebuttal: TLS motifs"
+author: 
+  - name: "Teun van den Brand"
+    email: "t.vd.brand@nki.nl"
+    affiliation: "Netherlands Cancer Institute"
+date: '`r format(Sys.time(), "%d/%m/%Y")`'
+output: 
+  html_document:
+    theme: united
+    highlight: pygments
+    fig_caption: yes
+    code_folding: hide
+    df_print: kable
+    toc: true
+    toc_depth: 4
+    toc_float:
+      collapsed: false
+bibliography: /DATA/users/t.vd.brand/bibliography/articles.bibtex
+knit: |
+  # Redirect output to HTML folder
+  (function(inputFile, encoding) {
+    outputFile <- gsub("Rmd$", "html", basename(inputFile))
+    rmarkdown::render(
+      input = inputFile,
+      encoding = encoding,
+      output_file = here::here("html", outputFile)
+    )
+  })
+---
+
+## Setup {.tabset}
+
+<!-- little HTML script to do indentation of the table of contents -->
+<script>
+    $(document).ready(function() {
+      $items = $('div#TOC li');
+      $items.each(function(idx) {
+        num_ul = $(this).parentsUntil('#TOC').length;
+        $(this).css({'text-indent': num_ul * 10, 'padding-left': 0});
+      });
+
+    });
+</script>
+
+```{css, echo = FALSE}
+div.sourceCode {
+  overflow-x: hidden;
+}
+```
+
+### Load packages
+
+```{r stfu, include = FALSE}
+# No, I do *not* want your start-up messages, thank you very much
+library <- function(...) {
+  suppressPackageStartupMessages(base::library(...))
+}
+```
+
+
+```{r load_packages}
+library(ggplot2)
+library(SingleCellExperiment)
+library(scales)
+library(scran)
+library(here)
+source(here("rscripts", "project_functions_plotting.R"))
+```
+
+### Load data
+
+```{r load_data}
+exp_file <- here::here("rds", "06_LSI_experiment.rds")
+exp <- readRDS(exp_file)
+```
+
+### Setup Aesthetics
+
+```{r setup_aes}
+CYRUP <- c("#fed500", "#009bef", "#ff5c49", "#949494", "#D8D8D8")
+```
+
+
+```{r}
+`tail<-` <- function(x, n = 6L, value, ...) {
+  stopifnot(length(n) == 1L)
+  xlen <- length(x)
+  n <- if (n < 0L) max(xlen + n, 0L) else min(n, xlen)
+  x[seq.int(to = xlen, length.out = n)] <- value
+  x
+}
+`head<-` <- function(x, n = 6L, value, ...) {
+  stopifnot(length(n) == 1L)
+  n <- if (n < 0L) max(length(x) + n, 0L) else min(n, length(x))
+  x[seq_len(n)] <- value
+  x
+}
+```
+
+
+## Aim
+
+### Filtering
+
+We want to compare the timecourse batch versus the timecourse2 batch, so as to exclude the pilot batch which was made with an older culture of mESCs.
+
+```{r}
+motifs <- altExp(exp, "motifs")
+colData(motifs) <- colData(exp)
+motifs <- motifs[, motifs$batch %in% c("timecourse", "timecourse2")]
+```
+
+Only comparing across -M/+M in clusters where we have >=50 cells on both sides.
+This then includes clusters B, C, and E.
+
+```{r}
+table(
+  motifs$sample,
+  motifs$clusters$cluster
+)
+```
+
+
+```{r}
+motifs <- motifs[, motifs$sample %in% c("120h (-M)", "120h (+M)")]
+motifs <- motifs[, motifs$clusters$cluster %in% c("B", "C", "E")]
+motifs$sample <- droplevels(motifs$sample)
+motifs$clusters <- factor(motifs$clusters$cluster)
+```
+
+### Cluster B
+
+```{r}
+j <- which(motifs$clusters == "B")
+
+template <- data.frame(
+  clust = motifs$clusters[j],
+  sample = motifs$sample[j],
+  value = NA_real_
+)
+
+test <- lapply(seq_len(nrow(motifs)), function(i) {
+  
+  df <- template
+  df$value <- assay(motifs)[i, j]
+  
+  fit <- lm(value ~ sample, data = df)
+  fit <- broom::tidy(fit)
+  fit$motif <- rowData(motifs)$name[i]
+  fit
+
+})
+
+test <- data.table::rbindlist(test)
+test <- test[term == "sample120h (+M)"]
+test$fdr <- p.adjust(test$p.value, "fdr")
+test <- test[order(estimate)]
+test$label <- NA_character_
+head(test$label) <- head(test$motif)
+tail(test$label) <- tail(test$motif)
+
+ggplot(test, aes(estimate, p.value)) +
+  geom_hline(yintercept = 0.05, colour = "grey50") +
+  geom_point() +
+  ggrepel::geom_text_repel(aes(label = label)) +
+  scale_y_continuous(trans = c("log10", "reverse"))
+```
+
+
+```{r}
+examples <- test$label[!is.na(test$label)]
+i <- match(examples, rowData(motifs)$name)
+
+df <- assay(motifs)[i, j]
+dimnames(df) <- NULL
+df <- reshape2::melt(df)
+df$Var1 <- rowData(motifs)$name[i][df$Var1]
+df$Var2 <- motifs$sample[j]
+B_examples <- df
+
+ggplot(df, aes(Var1, value, fill = Var2)) +
+  geom_boxplot() +
+  labs(
+    x = "Motif", y = "Z-Score",
+    fill = "Sample"
+  )
+```
+
+### Cluster C
+
+```{r}
+j <- which(motifs$clusters == "C")
+
+template <- data.frame(
+  clust = motifs$clusters[j],
+  sample = motifs$sample[j],
+  value = NA_real_
+)
+
+test <- lapply(seq_len(nrow(motifs)), function(i) {
+  
+  df <- template
+  df$value <- assay(motifs)[i, j]
+  
+  fit <- lm(value ~ sample, data = df)
+  fit <- broom::tidy(fit)
+  fit$motif <- rowData(motifs)$name[i]
+  fit
+
+})
+
+test <- data.table::rbindlist(test)
+test <- test[term == "sample120h (+M)"]
+test$fdr <- p.adjust(test$p.value, "fdr")
+test <- test[order(estimate)]
+test$label <- NA_character_
+head(test$label) <- head(test$motif)
+tail(test$label) <- tail(test$motif)
+
+ggplot(test, aes(estimate, p.value)) +
+  geom_hline(yintercept = 0.05, colour = "grey50") +
+  geom_point() +
+  ggrepel::geom_text_repel(aes(label = label)) +
+  scale_y_continuous(trans = c("log10", "reverse"))
+```
+
+
+```{r}
+examples <- test$label[!is.na(test$label)]
+i <- match(examples, rowData(motifs)$name)
+
+df <- assay(motifs)[i, j]
+dimnames(df) <- NULL
+df <- reshape2::melt(df)
+df$Var1 <- rowData(motifs)$name[i][df$Var1]
+df$Var2 <- motifs$sample[j]
+C_examples <- df
+
+ggplot(df, aes(Var1, value, fill = Var2)) +
+  geom_boxplot() +
+  labs(
+    x = "Motif", y = "Z-Score",
+    fill = "Sample"
+  )
+```
+
+
+### Cluster E
+
+```{r}
+j <- which(motifs$clusters == "E")
+
+template <- data.frame(
+  clust = motifs$clusters[j],
+  sample = motifs$sample[j],
+  value = NA_real_
+)
+
+test <- lapply(seq_len(nrow(motifs)), function(i) {
+  
+  df <- template
+  df$value <- assay(motifs)[i, j]
+  
+  fit <- lm(value ~ sample, data = df)
+  fit <- broom::tidy(fit)
+  fit$motif <- rowData(motifs)$name[i]
+  fit
+
+})
+
+test <- data.table::rbindlist(test)
+test <- test[term == "sample120h (+M)"]
+test$fdr <- p.adjust(test$p.value, "fdr")
+test <- test[order(estimate)]
+test$label <- NA_character_
+head(test$label) <- head(test$motif)
+tail(test$label) <- tail(test$motif)
+
+ggplot(test, aes(estimate, p.value)) +
+  geom_hline(yintercept = 0.05, colour = "grey50") +
+  geom_point() +
+  ggrepel::geom_text_repel(aes(label = label)) +
+  scale_y_continuous(trans = c("log10", "reverse"))
+```
+
+
+```{r}
+examples <- test$label[!is.na(test$label)]
+i <- match(examples, rowData(motifs)$name)
+
+df <- assay(motifs)[i, j]
+dimnames(df) <- NULL
+df <- reshape2::melt(df)
+df$Var1 <- rowData(motifs)$name[i][df$Var1]
+df$Var2 <- motifs$sample[j]
+E_examples <- df
+
+ggplot(df, aes(Var1, value, fill = Var2)) +
+  geom_boxplot() +
+  labs(
+    x = "Motif", y = "Z-Score",
+    fill = "Sample"
+  )
+```
+### Combined
+
+```{r}
+
+
+examples <- data.table::rbindlist(list(
+  `Late NMP` = B_examples, `SC` = C_examples, `PxMD` = E_examples
+), idcol = "cluster")
+examples$cluster <- factor(examples$cluster, c("Late NMP", "SC", "PxMD"))
+
+p <- ggplot(examples, aes(value, Var1, colour = Var2)) +
+  geom_vline(xintercept = 0) +
+  geom_boxplot(outlier.shape = NA, position = position_dodge2(reverse = TRUE)) +
+  facet_wrap(~ cluster, nrow = 1, scales = "free_y") +
+  scale_x_continuous(
+    limits = c(-4, 4), oob = oob_keep,
+    name = "Motif Z-Score"
+  ) +
+  scale_y_discrete(
+    name = "Motifs",
+    labels = toupper
+  ) +
+  scale_colour_manual(
+    limits = c("120h (-M)", "120h (+M)"),
+    values = c("#999999", "#e41a1c"),
+    labels = c("\u2212 Matrigel", "+ Matrigel"),
+    name = NULL,
+    guide = ggh4x::guide_stringlegend()
+  ) +
+  ggh4x::force_panelsizes(
+    rows = unit(12 * 0.8, "lines"),
+    cols = unit(3, "cm")
+  ) +
+  theme(
+    strip.text.x.top = element_text(hjust = 0),
+    axis.line.y.left = element_blank(),
+    axis.ticks.y.left = element_blank()
+  )
+
+ggsave(
+  here("figures", "manuscript", "Rev_TLS_motifs.svg"),
+  plot = p,
+  device = svglite::svglite, width = 150, height = 100, units = "mm",
+  fix_text_size = FALSE
+)
+```
+
+
+
+## References
+
+<div id="refs"></div>
+
+## Session Info
+
+```{r session_info, include=TRUE, echo=FALSE, results = "asis"}
+pkgs <- loadedNamespaces()
+libTvdB::format_sessioninfo_html(pkgs)
+```

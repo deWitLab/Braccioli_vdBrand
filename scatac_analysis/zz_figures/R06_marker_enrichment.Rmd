@@ -1,0 +1,332 @@
+---
+title: "Marker Enrichment"
+author: 
+  - name: "Teun van den Brand"
+    email: "t.vd.brand@nki.nl"
+    affiliation: "Netherlands Cancer Institute"
+date: '`r format(Sys.time(), "%d/%m/%Y")`'
+output: 
+  html_document:
+    theme: united
+    highlight: pygments
+    fig_caption: yes
+    code_folding: hide
+    df_print: kable
+    toc: true
+    toc_depth: 4
+    toc_float:
+      collapsed: false
+bibliography: /DATA/users/t.vd.brand/bibliography/articles.bibtex
+knit: |
+  # Redirect output to HTML folder
+  (function(inputFile, encoding) {
+    outputFile <- gsub("Rmd$", "html", basename(inputFile))
+    rmarkdown::render(
+      input = inputFile,
+      encoding = encoding,
+      output_file = here::here("html", outputFile)
+    )
+  })
+---
+
+## Setup {.tabset}
+
+<!-- little HTML script to do indentation of the table of contents -->
+<script>
+    $(document).ready(function() {
+      $items = $('div#TOC li');
+      $items.each(function(idx) {
+        num_ul = $(this).parentsUntil('#TOC').length;
+        $(this).css({'text-indent': num_ul * 10, 'padding-left': 0});
+      });
+
+    });
+</script>
+
+```{css, echo = FALSE}
+div.sourceCode {
+  overflow-x: hidden;
+}
+```
+
+### Load packages
+
+```{r stfu, include = FALSE}
+# No, I do *not* want your start-up messages, thank you very much
+library <- function(...) {
+  suppressPackageStartupMessages(base::library(...))
+}
+```
+
+
+```{r load_packages}
+library(ggplot2)
+library(SingleCellExperiment)
+library(here)
+library(data.table)
+library(GenomicRanges)
+library(Matrix)
+library(scales)
+```
+
+### Load data
+
+```{r load_data}
+annotation <- here("data_raw", "references", "GSE133244_Supplementary_Table6_OCRs.txt.gz")
+annotation <- fread(annotation)
+
+exp <- readRDS(here("rds", "06_LSI_experiment.rds"))
+
+preprocessed <- here("rds", "06_PS_marker_exp.rds")
+if (file.exists(preprocessed)) {
+  sce <- readRDS(preprocessed)
+} else {
+  sce <- NULL
+  exp <- readRDS(here("rds", "06_LSI_experiment.rds"))
+  cells <- colData(exp)
+  
+  reads <- here("rds", "04_GRanges_joined.rds")
+  reads <- readRDS(reads)
+}
+```
+
+### Setup Aesthetics
+
+```{r setup_aes}
+source(here("rscripts", "project_functions_plotting.R"))
+```
+
+## Aim
+
+Investigate enrichment of marker peaks from Pijuan-Sala et al. (2020) in our gastruloid data.
+
+## Processing
+
+### Format marker list
+
+```{r, eval=is.null(sce)}
+cell_types <- strsplit(annotation$celltype_specificity, ";")
+cell_types <- CharacterList(cell_types)
+cell_types <- cell_types[!is.na(cell_types)]
+
+markers <- annotation[,
+  GRanges(paste0("chr", peak_chr), IRanges(peak_start, peak_end),
+          cell_type = cell_types)
+]
+```
+
+### Counting
+
+#### Filter reads
+
+```{r, eval=is.null(sce)}
+# Keep reads in annotated cells
+read_barcode <- runValue(reads$barcode)
+read_batch <- decode(reads$batch[start(reads$barcode)])
+read_alias <- paste0(read_barcode, "&", read_batch)
+reads$alias <- Rle(read_alias, runLength(reads$barcode))
+keep <- read_alias %in% cells$alias
+reads <- reads[Rle(keep, runLength(reads$barcode))]
+
+# Clean up out-of-bounds and scaffold chromosome reads
+reads <- trim(reads)
+reads <- keepStandardChromosomes(reads, "Mus_musculus", "coarse")
+```
+
+#### Finding overlaps
+
+```{r, eval=is.null(sce)}
+fo <- findOverlaps(reads, markers)
+fo <- data.table(alias = decode(reads$alias)[from(fo)],
+                 peak  = to(fo))
+fo <- fo[, .N, by = c("alias", "peak")]
+fo[, match := match(alias, cells$alias)]
+mdim <- c(length(markers), nrow(cells))
+
+mtx <- fo[, sparseMatrix(peak, match, x = N, dims = mdim)]
+
+sce <- SingleCellExperiment(
+  assays = list(counts = mtx),
+  rowRanges = markers,
+  colData = cells
+)
+saveRDS(sce, here("rds", "06_PS_marker_exp.rds"))
+```
+
+## Calculate enrichment
+
+The enrichment metric we calculate as 'marker ratio' is as follows:
+
+$$\text{Marker Ratio} = \frac{\frac{\text{RIP}_\text{FG}}{\text{Mbp}_\text{FG}} + 1}{\frac{\text{RIP}_\text{BG}}{\text{Mbp}_\text{BG}} + 1}$$
+
+Where $\text{RIP}$ is 'reads in peaks', $\text{Mbp}$ is megabasepairs, $\text{FG}$ is the foreground (marker) peak set and $\text{BG}$ is the background, which includes all peaks in the Pijuan-Sala peaks except the foreground.
+The formula also simplifies to:
+
+$$\text{Marker Ratio} = \frac{\text{Mbp}_\text{BG}(\text{RIP}_\text{FG} + \text{Mbp}_\text{FG})}{\text{Mbp}_\text{FG}(\text{RIP}_\text{BG} + \text{Mbp}_\text{BG})}$$
+
+```{r}
+cell_types <- rowData(sce)$cell_type
+types <- unique(unlist(cell_types))
+
+catmat <- vapply(types, function(type) {
+  includes <- unlist(cell_types) == type
+  includes <- relist(includes, cell_types)
+  any(includes)
+}, logical(length(cell_types)))
+mode(catmat) <- "integer"
+catmat <- Matrix(catmat, sparse = TRUE)
+
+count_per_foreground <- as.matrix(crossprod(catmat, assay(sce, "counts")))
+count_per_background <- as.matrix(crossprod(1 - catmat, assay(sce, "counts")))
+
+width <- width(rowRanges(sce))
+Mbp_foreground <- as.vector(width %*% catmat) / 1e6
+Mbp_background <- as.vector(width %*% (1 - catmat)) / 1e6
+
+norm_foreground <- count_per_foreground / rep(Mbp_foreground, ncol(count_per_foreground))
+norm_background <- count_per_background / rep(Mbp_background, ncol(count_per_background))
+
+ratio <- (norm_foreground + 1) / (norm_background + 1)
+ratio <- t(ratio)
+```
+
+## Visualise
+
+```{r}
+umap <- reducedDim(exp, "UMAP")
+colnames(umap) <- c("UMAP1", "UMAP2")
+stopifnot(all(rownames(umap) == rownames(ratio)))
+
+df <- cbind(as.data.table(umap), as.data.table(ratio))
+df <- df[exp$batch != "KOs"]
+
+long <- melt.data.table(df, id.vars = c("UMAP1", "UMAP2"))
+long <- long[variable != "Ubiquitous"]
+```
+
+```{r}
+long$label <- gsub(" ", "\n", long$variable)
+asp <- diff(range(long$UMAP2)) / diff(range(long$UMAP1))
+
+p <- ggplot(long, aes(UMAP1, UMAP2, colour = value)) +
+  ggrastr::rasterise(
+    geom_point(size = 0.2),
+    dpi = 600, dev = "ragg"
+  ) +
+  scale_colour_gradientn(
+    colours = div_colours,
+    rescaler = ~ scales::rescale_mid(.x, mid = 1),
+    limits = c(0, 5),
+    oob = scales::oob_squish,
+    name = "Marker Ratio",
+    guide = guide_colorbar(barwidth = unit(5.5, "pt"))
+  ) +
+  facet_wrap(~ label, ncol = 6) +
+  scale_x_continuous(breaks = NULL, name = "UMAP 1") +
+  scale_y_continuous(breaks = NULL, name = "UMAP 2") +
+  coord_equal() +
+  theme(
+    strip.text.x = element_text(hjust = 0, vjust = 1, margin = margin())
+  ) +
+  ggh4x::force_panelsizes(rows = unit(2 * asp, "cm"), cols = unit(2, "cm"))
+
+ggsave(
+  here("figures", "manuscript", "FigSX_Marker_Enrichment_UMAPs.svg"), plot = p,
+  device = svglite::svglite, width = 200, height = 100, unit = "mm",
+  fix_text_size = FALSE
+)
+```
+
+### Summarise
+
+```{r}
+df <- cbind(cluster = colData(sce)$clusters$cluster, as.data.table(ratio))
+df <- df[exp$batch != "KOs"]
+df <- melt.data.table(df, id.vars = "cluster")
+df <- df[variable != "Ubiquitous"]
+
+ggplot(df, aes(value, variable)) +
+  geom_violin() +
+  facet_grid(~ cluster) +
+  theme(aspect.ratio = NULL)
+```
+
+
+```{r}
+smmry <- df[, .(mu = mean(value), sd = sd(value), med = median(value)), by = c("cluster", "variable")]
+smmry[, cv := sd / mu]
+
+m <- dcast.data.table(smmry, variable ~ cluster, value.var = "mu")
+m <- `dimnames<-`(as.matrix(as.data.frame(m)[,-1]), list(m$variable, colnames(m)[-1]))
+
+c <- hclust(dist(m))
+
+p <- ggplot(smmry, aes(cluster, variable)) +
+  geom_point(aes(size = cv^2, colour = mu)) +
+  scale_colour_gradientn(
+    colours = div_colours,
+    rescaler = ~ scales::rescale_mid(.x, mid = 1),
+    limits = c(0, 3),
+    oob = scales::oob_squish,
+    name = "Marker Ratio",
+    guide = guide_colourbar(
+      barheight = unit(5.5, 'pt'),
+      barwidth = unit(8 * 3, "mm"), 
+      title.position = "top"
+    )
+  ) +
+  scale_size_continuous(
+    trans = c("reverse"),
+    range = c(0, 3),
+    name  = expression(CV^2),
+    guide = guide_legend(
+      title.position = "top", 
+      label.position = "bottom"
+    )
+  ) +
+  coord_equal() +
+  scale_y_discrete(
+    name = "Marker Peak Set (Pijuan-Sala)",
+    limits = rev(union(c(
+      "NMP", "Spinal cord", "Mid/Hindbrain", "Forebrain", "Neural crest",
+      "Somitic mesoderm", "Mixed mesoderm", "Paraxial mesoderm",
+      "Pharyngeal mesoderm", "Mesenchyme", "Cardiomyocytes",
+      "Allantois", "Endothelium", "Erythroid"
+    ), rownames(m)))
+  ) +
+  scale_x_discrete(
+    name = "Gastruloid Cluster",
+    limits = LETTERS[1:8],
+    labels = c("Prog", "NMP", "SC", "SMD", "PxMD", "PhMD", "Enth", "Endo"),
+    guide = guide_axis(angle = 45)
+  ) +
+  ggh4x::force_panelsizes(
+    rows = unit(18 * 3, "mm"),
+    cols = unit(8 * 3, "mm")
+  ) +
+  theme(
+    legend.position = "bottom",
+    legend.box = "vertical",
+    legend.spacing.x = unit(0, "mm"),
+    legend.key.size = unit(4.5, "mm"),
+    legend.box.just = "left"
+  )
+
+ggsave(
+  here("figures", "manuscript", "FigSX_Marker_Enrichment_Bubbles.svg"), plot = p,
+  device = svglite::svglite, width = 100, height = 100, unit = "mm",
+  fix_text_size = FALSE
+)
+```
+
+
+## References
+
+<div id="refs"></div>
+
+## Session Info
+
+```{r session_info, include=TRUE, echo=FALSE, results = "asis"}
+pkgs <- loadedNamespaces()
+libTvdB::format_sessioninfo_html(pkgs)
+```
