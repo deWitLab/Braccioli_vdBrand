@@ -1,0 +1,220 @@
+
+### Libraries
+
+```{r, results = 'hide', warning = FALSE, message = FALSE}
+library(ggplot2)
+library(data.table)
+library(stringr)
+library(dplyr)
+```
+
+
+## Importing results
+```{r}
+results <- list.files(path = "../NR2F2_IF/", recursive = TRUE, pattern = ".csv$", full.names = TRUE)
+
+values_example <- read.csv(results[3], sep = ",",  header = T)
+
+data <- lapply(results, read.csv, sep = ",")
+
+str <-  str_remove(results, ".csv")
+
+str_names <- tstrsplit(str, c("/"))
+
+data_labeled <- mapply(cbind, data, "Line"= str_names[[4]], "Replicate"= str_names[[5]], SIMPLIFY=F)
+
+df <- bind_rows(data_labeled)
+
+df[is.na(df)] <- 0  
+
+df$Line <- factor(
+  df$Line,
+  levels = c("HM1", "CDXKO")
+)
+
+
+df <- df %>%
+  mutate(
+  area_label = tstrsplit(Label, ":")[[2]] %>% substr(start = 1, stop = nchar(.) - 2)
+  )
+
+```
+
+
+## Analysis for channel 1 - NR2F2
+```{r}
+####channel 1 - NR2F2
+
+channel_name <- c("1")
+
+staining_name <- c("Total_area_slice")
+
+df_channel <-  filter(df, Ch == channel_name)
+
+df_channel_NR2F2 <- filter(df_channel, grepl(staining_name, area_label))
+
+df_channel_NR2F2_rep1 <- filter(df_channel_NR2F2, Replicate == "REP1")
+
+df_channel_NR2F2_rep2 <- filter(df_channel_NR2F2, Replicate == "REP2")
+
+
+HM1_rep1 <- df_channel_NR2F2_rep1 %>% filter(Line == "HM1")
+
+HM1_rep1_mean <- mean(HM1_rep1$Mean)
+
+HM1_rep2 <- df_channel_NR2F2_rep2 %>% filter(Line == "HM1")
+
+HM1_rep2_mean <- mean(HM1_rep2$Mean)
+
+
+df_channel_NR2F2_rep1_norm <- df_channel_NR2F2_rep1 %>% mutate(Norm_Mean = df_channel_NR2F2_rep1$Mean/HM1_rep1_mean)
+
+df_channel_NR2F2_rep2_norm <- df_channel_NR2F2_rep2 %>% mutate(Norm_Mean = df_channel_NR2F2_rep2$Mean/HM1_rep2_mean)
+
+norm_df_df_channel_NR2F2 <- rbind(df_channel_NR2F2_rep1_norm, df_channel_NR2F2_rep2_norm)
+
+
+```
+
+
+## Plotting mean of NR2F2
+```{r}
+
+#Plot NR2F2 Norm mean 
+ 
+norm_df_df_channel_NR2F2 %>%
+ggplot(aes( x=Line, y= Norm_Mean, fill = Line)) +
+  geom_boxplot()+
+  scale_fill_brewer(palette = "Pastel2") +
+  ylab("NR2F2 normalized mean intensity") +
+  ylim(0, 1.5) +
+  #facet_wrap(~Replicate) +
+  theme_classic() 
+
+
+HM1_only <- norm_df_df_channel_NR2F2 %>% filter(Line == "HM1") 
+
+CDXKO_only <- norm_df_df_channel_NR2F2 %>% filter(Line == "CDXKO") 
+
+
+wilcox.test(HM1_only$Norm_Mean, CDXKO_only$Norm_Mean)
+
+# NOT SIGNIFICANT
+
+
+```
+
+
+## Plotting function
+
+```{r}
+
+plot_fun <- function(data, var, label_nudge = 5e4) {
+  yrange <- diff(range(rlang::eval_tidy(enquo(var), data)))
+
+  ggplot(data, aes(x = 
+                     Line, y = {{var}}, fill = Line,
+                   colour = after_scale(colorspace::darken(fill, 0.4)))) +
+    gghalves::geom_half_boxplot(
+      outlier.shape = NA, width = 0.5,
+      position = position_nudge(x = -0.1)
+    ) +
+    ggbeeswarm::geom_beeswarm(
+      aes(shape = Replicate),
+      side = 1, size = 1, cex = 3
+    ) +
+    stat_summary(
+      aes(label = after_stat(paste0("n = ", ymax)),
+          y = stage({{var}}, after_stat = ymin)),
+      fun.max = length, fun.min = max,
+      geom = "text", position = position_nudge(y = yrange * 0.1)
+    ) +
+  scale_y_continuous(
+  limits = c(0, 1.5), expand = c(0, 0, 0.1, 0)
+    ) +
+    scale_fill_brewer(
+      palette = "Set1",
+      guide  = "none"
+    ) +
+    scale_shape_manual(
+      values = 21:25,
+      guide  = "none"
+    ) +
+    theme(
+      panel.grid.minor = element_blank()
+    )
+}
+
+```
+
+# Plotting area and mean intensity NR2F2
+
+```{r}
+p <- plot_fun(norm_df_df_channel_NR2F2, Norm_Mean) +
+  labs(x = "Line", y = "NR2F2 norm. mean intensity")
+
+print(p)
+
+```
+
+
+
+## Plotting Teun's stile (add p <- next to the plot you want to print first and change file label below)
+``` {R}
+# Before plotting ---------------------------------------------------------
+
+mycolour <- "#000000FF"
+
+# Geom defaults
+text_defaults <- list(family = "Roboto", size = 6 / .pt, colour = mycolour)
+ggplot2::update_geom_defaults("text",  text_defaults)
+ggplot2::update_geom_defaults("label", text_defaults)
+
+# Theme defaults
+ggplot2::theme_set(ggplot2::theme_gray())
+ggplot2::theme_update(
+  text              = ggplot2::element_text(colour = mycolour, size = 8,
+                                            family = "Roboto"),
+  line              = ggplot2::element_line(colour = mycolour),
+  aspect.ratio      = 1,
+  axis.line         = ggplot2::element_line(colour = mycolour, lineend = "square"),
+  axis.ticks        = ggplot2::element_line(colour = mycolour),
+  axis.text         = ggplot2::element_text(colour = mycolour, size = 6),
+  legend.title      = ggplot2::element_text(colour = mycolour, size = 6),
+  legend.text       = ggplot2::element_text(colour = mycolour, size = 6),
+  legend.key        = ggplot2::element_blank(),
+  legend.background = ggplot2::element_rect(colour = NA, fill = NA),
+  panel.background  = ggplot2::element_blank(),
+  panel.grid.major  = ggplot2::element_line(colour = "grey95", size = 0.25),
+  panel.grid.minor  = ggplot2::element_blank(),
+  plot.background   = ggplot2::element_blank(),
+  strip.background  = ggplot2::element_blank(),
+  strip.text        = ggplot2::element_text(colour = mycolour, size = 8)
+)
+
+# After plotting ----------------------------------------------------------
+
+# Dimensions of the panel, not entire plotting area. If using facets, change
+# for every panel along dimension. E.g. two left-to-right panels should be
+# panel_width_cm <- c(4, 4)
+panel_width_cm  <- 4
+panel_height_cm <- 4
+
+p <- p + ggh4x::force_panelsizes(
+  rows = unit(panel_height_cm, "cm"), 
+  cols = unit(panel_width_cm, "cm")
+)
+
+ggsave(
+  "NR2F2_mean.svg", # <- change this
+  plot   = p, 
+  device = svglite::svglite, 
+  width  = sum(panel_width_cm) * 2,
+  height = sum(panel_height_cm) * 2,
+  unit   = "cm",
+  fix_text_size = FALSE
+)
+
+
+
+```

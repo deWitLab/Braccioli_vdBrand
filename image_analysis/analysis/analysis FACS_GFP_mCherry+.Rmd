@@ -1,0 +1,101 @@
+
+### Libraries
+
+```{r, results = 'hide', warning = FALSE, message = FALSE}
+library(ggplot2)
+library(data.table)
+library(stringr)
+library(dplyr)
+library(mgcv)
+library(RColorBrewer)
+```
+
+## Importing results
+```{r}
+
+results <- list.files(path = "../FACS_analysis/", recursive = TRUE, pattern = ".csv$", full.names = TRUE)
+
+data <- read.csv(results, header = T, sep = ';', dec = ",")
+
+
+
+```
+
+
+```{r}
+
+#plotting
+
+data <- data %>% mutate(population = factor(population, levels = c("mCherry+", "GFP+"))) %>%  mutate(time = factor(time, levels = c("72h", "96h", "120h")))
+
+p <- data %>% ggplot(aes(x= time, y= percentage, fill = population))+
+  geom_boxplot() +
+   facet_wrap(~clone) +
+    theme_classic() +
+  xlab("Time") +
+  ylab("Percentage positive cells") +
+  theme(panel.spacing=unit(0.4,"cm"), strip.background = element_blank()) 
+
+
+```
+
+
+## Plotting Teun's stile (add p <- next to the plot you want to print first and change file label below)
+``` {R}
+# Before plotting ---------------------------------------------------------
+
+mycolour <- "#000000FF"
+
+# Geom defaults
+text_defaults <- list(family = "Roboto", size = 6 / .pt, colour = mycolour)
+ggplot2::update_geom_defaults("text",  text_defaults)
+ggplot2::update_geom_defaults("label", text_defaults)
+
+# Theme defaults
+ggplot2::theme_set(ggplot2::theme_gray())
+ggplot2::theme_update(
+  text              = ggplot2::element_text(colour = mycolour, size = 8,
+                                            family = "Roboto"),
+  line              = ggplot2::element_line(colour = mycolour),
+  aspect.ratio      = 1,
+  axis.line         = ggplot2::element_line(colour = mycolour, lineend = "square"),
+  axis.ticks        = ggplot2::element_line(colour = mycolour),
+  axis.text         = ggplot2::element_text(colour = mycolour, size = 6),
+  legend.title      = ggplot2::element_text(colour = mycolour, size = 6),
+  legend.text       = ggplot2::element_text(colour = mycolour, size = 6),
+  legend.key        = ggplot2::element_blank(),
+  legend.background = ggplot2::element_rect(colour = NA, fill = NA),
+  panel.background  = ggplot2::element_blank(),
+  panel.grid.major  = ggplot2::element_line(colour = "grey95", size = 0.25),
+  panel.grid.minor  = ggplot2::element_blank(),
+  plot.background   = ggplot2::element_blank(),
+  strip.background  = ggplot2::element_blank(),
+  strip.text        = ggplot2::element_text(colour = mycolour, size = 8)
+)
+
+# After plotting ----------------------------------------------------------
+
+# Dimensions of the panel, not entire plotting area. If using facets, change
+# for every panel along dimension. E.g. two left-to-right panels should be
+# panel_width_cm <- c(4, 4)
+panel_width_cm  <- 18
+panel_height_cm <- 4
+
+p <- p + ggh4x::force_panelsizes(
+  rows = unit(panel_height_cm, "cm"), 
+  cols = unit(panel_width_cm, "cm")
+)
+
+ggsave(
+  "FACS_plot.svg", # <- change this
+  plot   = p, 
+  device = svglite::svglite, 
+  width  = sum(panel_width_cm) * 2,
+  height = sum(panel_height_cm) * 2,
+  unit   = "cm",
+  fix_text_size = FALSE
+)
+
+
+
+```

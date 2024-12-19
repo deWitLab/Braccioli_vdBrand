@@ -1,0 +1,141 @@
+
+
+### Libraries
+
+```{r, results = 'hide', warning = FALSE, message = FALSE}
+library(ggplot2)
+library(data.table)
+library(stringr)
+library(dplyr)
+```
+
+
+## Importing results
+```{r}
+
+## FOR MONOCUTLURES
+results <- list.files(path = "../multipolarity/", recursive = TRUE, pattern = ".csv$", full.names = TRUE)
+
+values_example <- read.csv(results[1], sep = ";",  header = T)
+
+data <- lapply(results, read.csv, sep = ";")
+
+#str <-  str_remove(results, ".csv")
+#str_names <- tstrsplit(str, c("//"))
+#str_info <- tstrsplit(str, c("_"))
+#names(data) <- str_names[[2]]
+
+#data <- mapply(cbind, data, "Line"=str_info[[2]], "Replicate"=str_info[[3]],SIMPLIFY=F)
+
+df <- bind_rows(data)
+
+
+# Replace ovoid with spherical
+
+
+df[df == "ovoid"] <- "spherical"
+
+
+
+##FOR MIXING EXPERIMENTS
+
+results_mix <- read.csv("Summary_Luca_score_MSGN1_mixing_experiments.csv", sep = ";")
+
+
+results_mix[results_mix == "ovoid"] <- "spherical"
+
+```
+
+```{r}
+
+
+
+# Plotting multipolar scores monocultures and mixing experiments
+
+
+
+ggplot(df, aes(fill = moreno.score, x = line)) +
+  geom_bar(position = "fill") +
+  scale_fill_brewer(palette = "Set2", name = "Morphology")+
+  ylab("Ratio") +
+  theme_classic() 
+
+
+ggplot(df, aes(fill = mathias.score, x = line)) +
+  geom_bar(position = "fill") +
+  scale_fill_brewer(palette = "Set2", name = "Morphology")+
+  ylab("Ratio") +
+  theme_classic() 
+
+
+
+p <-ggplot(results_mix, aes(fill = Score.name, x = Line)) +
+  geom_bar(position = "fill") +
+  scale_fill_brewer(palette = "Set2", name = "Morphology")+
+  ylab("Ratio") +
+  theme_classic() 
+
+
+
+
+```
+## Plotting Teun's stile (add p <- next to the plot you want to print first and change file label below)
+``` {R}
+# Before plotting ---------------------------------------------------------
+
+mycolour <- "#000000FF"
+
+# Geom defaults
+text_defaults <- list(family = "Roboto", size = 6 / .pt, colour = mycolour)
+ggplot2::update_geom_defaults("text",  text_defaults)
+ggplot2::update_geom_defaults("label", text_defaults)
+
+# Theme defaults
+ggplot2::theme_set(ggplot2::theme_gray())
+ggplot2::theme_update(
+  text              = ggplot2::element_text(colour = mycolour, size = 8,
+                                            family = "Roboto"),
+  line              = ggplot2::element_line(colour = mycolour),
+  aspect.ratio      = 1,
+  axis.line         = ggplot2::element_line(colour = mycolour, lineend = "square"),
+  axis.ticks        = ggplot2::element_line(colour = mycolour),
+  axis.text         = ggplot2::element_text(colour = mycolour, size = 6),
+  legend.title      = ggplot2::element_text(colour = mycolour, size = 6),
+  legend.text       = ggplot2::element_text(colour = mycolour, size = 6),
+  legend.key        = ggplot2::element_blank(),
+  legend.background = ggplot2::element_rect(colour = NA, fill = NA),
+  panel.background  = ggplot2::element_blank(),
+  panel.grid.major  = ggplot2::element_line(colour = "grey95", size = 0.25),
+  panel.grid.minor  = ggplot2::element_blank(),
+  plot.background   = ggplot2::element_blank(),
+  strip.background  = ggplot2::element_blank(),
+  strip.text        = ggplot2::element_text(colour = mycolour, size = 8)
+)
+
+# After plotting ----------------------------------------------------------
+
+# Dimensions of the panel, not entire plotting area. If using facets, change
+# for every panel along dimension. E.g. two left-to-right panels should be
+# panel_width_cm <- c(4, 4)
+panel_width_cm  <- 4
+panel_height_cm <- 4
+
+p <- p + ggh4x::force_panelsizes(
+  rows = unit(panel_height_cm, "cm"), 
+  cols = unit(panel_width_cm, "cm")
+)
+
+ggsave(
+  "MSGN1KO_mixing_morphology_Luca.svg", # <- change this
+  plot   = p, 
+  device = svglite::svglite, 
+  width  = sum(panel_width_cm) * 2,
+  height = sum(panel_height_cm) * 2,
+  unit   = "cm",
+  fix_text_size = FALSE
+)
+
+
+
+```
+
