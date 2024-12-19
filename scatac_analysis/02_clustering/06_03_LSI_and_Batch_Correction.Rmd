@@ -1,0 +1,788 @@
+---
+title: "Latent Semantic Indexing"
+author: 
+  - name: "Teun van den Brand"
+    email: "t.vd.brand@nki.nl"
+    affiliation: "Netherlands Cancer Institute"
+date: '`r format(Sys.time(), "%d/%m/%Y")`'
+output: 
+  html_document:
+    theme: united
+    highlight: pygments
+    fig_caption: yes
+    code_folding: hide
+    df_print: kable
+    toc: true
+    toc_depth: 4
+    toc_float:
+      collapsed: false
+bibliography: /DATA/users/t.vd.brand/bibliography/articles.bibtex
+knit: |
+  # Redirect output to HTML folder
+  (function(inputFile, encoding) {
+    outputFile <- gsub("Rmd$", "html", basename(inputFile))
+    rmarkdown::render(
+      input = inputFile,
+      encoding = encoding,
+      output_file = here::here("html", outputFile)
+    )
+  })
+---
+
+## Setup {.tabset}
+
+<!-- little HTML script to do indentation of the table of contents -->
+<script>
+    $(document).ready(function() {
+      $items = $('div#TOC li');
+      $items.each(function(idx) {
+        num_ul = $(this).parentsUntil('#TOC').length;
+        $(this).css({'text-indent': num_ul * 10, 'padding-left': 0});
+      });
+
+    });
+</script>
+
+```{css, echo = FALSE}
+div.sourceCode {
+  overflow-x: hidden;
+}
+```
+
+### Load packages
+
+```{r stfu, include = FALSE}
+# No, I do *not* want your start-up messages, thank you very much
+library <- function(...) {
+  suppressPackageStartupMessages(base::library(...))
+}
+```
+
+
+```{r load_packages}
+library(SingleCellExperiment)
+library(GenomicRanges)
+library(Matrix)
+library(irlba)
+library(TxDb.Mmusculus.UCSC.mm10.knownGene)
+library(locfit)
+library(batchelor)
+
+library(here)
+library(ggplot2)
+library(ggh4x)
+library(scales)
+library(patchwork)
+```
+
+### Load data
+
+```{r load_data}
+exp <- readRDS(here("rds", "06_binary_experiment_combined.rds"))
+```
+
+### Setup Aesthetics
+
+```{r setup_aes}
+mycolour <- "#000000FF" # Opaque Black
+
+theme_set(theme_gray())
+theme_update(text = element_text(colour = mycolour),
+             line = element_line(colour = mycolour),
+             aspect.ratio = 1,
+             axis.line  = element_line(colour = mycolour),
+             axis.ticks = element_line(colour = mycolour),
+             axis.text  = element_text(colour = mycolour),
+             legend.key = element_blank(),
+             legend.background = element_rect(colour = NA, fill = NA),
+             panel.background = element_blank(),
+             panel.grid.major = element_line(colour = "grey95"),
+             panel.grid.minor = element_blank(),
+             plot.background  = element_blank(),
+             strip.background = element_blank(),
+             strip.text = element_text(colour = mycolour))
+CYRUP <- c("#fed500", "#009bef", "#ff5c49", "#949494", "#D8D8D8")
+rm(mycolour)
+
+sample_palette <- c(brewer_pal(palette = "Set1")(9), "black")
+```
+
+### Functions
+
+#### TF-IDF {.unlisted .unnumbered}
+
+```{r}
+tf_idf <- function(
+  x,
+  frequencies = TRUE,
+  log = TRUE,
+  pseudo_scale = 1e5,
+  idf = NULL
+) {
+  requireNamespace("Matrix")
+  x <- as(x, "dgCMatrix")
+  
+  idf <- calculate_idf(x, idf = idf)
+  tf  <- calculate_tf(x, frequencies, log, pseudo_scale)
+  
+  tfidf   <- Matrix::t(tf)
+  tfidf@x <- tfidf@x * rep.int(idf, diff(tfidf@p))
+  tfidf   <- Matrix::t(tfidf)
+  
+  dimnames(tfidf) <- dimnames(x)
+  attr(tfidf, "idf") <- idf
+  tfidf
+}
+
+calculate_idf <- function(x, idf = NULL) {
+  if (!is.null(idf)) {
+    stopifnot(
+      "Length of `idf` argument needs to match `nrow(x)`" = 
+        length(idf) == nrow(x),
+      "The `idf` argument needs to be a numeric vector" =
+        is.numeric(idf)
+    )
+    return(idf)
+  }
+  log(1 + ncol(x) / Matrix::rowSums(x))
+}
+
+calculate_tf <- function(
+    x, 
+    frequencies = TRUE, log = TRUE, pseudo_scale = 10e5
+) {
+  if (isTRUE(frequencies)) {
+    tf <- Matrix::t(Matrix::t(x) / Matrix::colSums(x))
+  } else {
+    tf <- x
+  }
+  
+  if (isTRUE(log)) {
+    if (isTRUE(frequencies)) {
+      tf@x <- log1p(tf@x * pseudo_scale)
+    } else {
+      tf@x <- log1p(tf@x * 1)
+    }
+  }
+  
+  tf
+}
+```
+
+#### Plot PCA {.unlisted .unnumbered}
+
+```{r}
+plot_pca <- function(pca, colour) {
+  
+  ve <- attr(pca, "varexp")
+  ve_titles <- paste0("PC", seq_along(ve), " (", percent(ve, 0.1), ")")
+  
+  df <- data.frame(
+    pc1    = pca[, 1],
+    pc2    = pca[, 2],
+    pc3    = pca[, 3],
+    colour = colour
+  )
+  
+  vedf <- data.frame(
+    pc = seq_along(ve),
+    ve = ve
+  )
+  
+  template <- ggplot(df, aes(colour = colour)) +
+    geom_point(alpha = 0.3, size = 0.5) +
+    guides(colour = guide_legend(override.aes = list(size = 2, alpha = 1))) +
+    coord_axes_inside()
+  
+  pc12 <- template + aes(pc1, pc2) +
+    labs(x = ve_titles[1], y = ve_titles[2])
+  
+  pc13 <- template + aes(pc1, pc3) +
+    labs(x = ve_titles[1], y = ve_titles[3])
+  
+  pc23 <- template + aes(pc2, pc3) +
+    labs(x = ve_titles[2], y = ve_titles[3])
+  
+  veplot <- ggplot(vedf, aes(pc, ve)) +
+    geom_pointpath(na.rm = TRUE) +
+    scale_x_continuous(
+      name = "PC #", limits = c(0, 20)
+    ) +
+    scale_y_continuous(
+      name = "Variance Explained", trans = "log10",
+      labels = percent_format(accuracy = 0.1)
+    )
+  
+  pc12 + pc23 + pc13 + veplot +
+    plot_layout(guides = "collect")
+}
+```
+
+
+## Aim
+
+Do dimensionality reduction in three ways:
+
+1. For *both* the timeseries and knockout data simultaneously in an integrated manner. This will make sure that the knockout data can contribute to the described variation in the PCA.
+2. For the timeseries data first, and then project the knockout data on top of the timeseries data. The timeseries data will then function as a framework to fit the knockout data into. 
+3. We'll keep a copy of strategy (1) with doublets included, for visualisation purposes later.
+
+## Filtering
+
+```{r, message=FALSE}
+# Declare filter criteria
+feats_per_cell <- 2000
+props_per_feat <- 0.02
+tss_dist_thres <- 3000
+
+# Find promoter overlaps
+tss <- genes(TxDb.Mmusculus.UCSC.mm10.knownGene)
+tss <- resize(resize(tss, 1, fix = "start"), tss_dist_thres, fix = "center")
+on_promoter <- overlapsAny(rowRanges(exp), tss)
+
+# Copy and store promoter overlaps
+orig <- exp
+rowData(orig)$on_promoter <- on_promoter
+```
+
+We filter the cells and features (peaks) in the following ways. For the cells:
+
+1. We require cells to have counts in at least `r feats_per_cell` out of `r number(nrow(orig), big.mark = ",")` features.
+2. We require cells to have been classified as singlets in an earlier analysis using the **{scDblFinder}** package, i.e. we remove doublets.
+
+In addition, we filter features (peaks) as follows:
+
+1. We require the feature to be accessible in at least `r percent(props_per_feat)` of cells.
+2. We only include features that are further away than `r number(tss_dist_thres / 2, big.mark = ',', scale = 1e-3, suffix = "kb", accuracy = 0.1)` from TSS of known genes, as defined by the **{TxDb.Mmusculus.UCSC.mm10.knownGene}** package.
+
+### Integrated
+
+As described above.
+
+```{r, results = 'hold'}
+mat  <- assay(orig, "counts")
+
+# Make cell filter
+col_sum    <- Matrix::colSums(mat)
+keep_cells <- exp$doublets$class == "singlet"
+keep_cells <- keep_cells & col_sum >= feats_per_cell
+
+# Make feature filter
+row_mean    <- Matrix::rowMeans(mat[, keep_cells])
+keep_feat   <- row_mean >= props_per_feat & !on_promoter
+
+# Apply filter
+merged <- orig[keep_feat, keep_cells]
+
+# Keep copy with all features included
+all_features <- orig[, keep_cells]
+```
+
+We retain a `r paste0(dim(merged), collapse = " x ")` matrix for the integrated data to calculate the LSI with.
+
+### Projected
+
+The only difference for the projected set of data is that we recompute the proportion of cells in which features are accessible. 
+
+```{r}
+is_timeseries <- !(orig$batch == "KOs")
+
+# Filter rows
+row_mean  <- Matrix::rowMeans(mat[, keep_cells & is_timeseries])
+keep_feat <- row_mean >= props_per_feat & !on_promoter
+
+# Filter data to be projected
+proj <- orig[keep_feat, keep_cells]
+```
+
+We retain a `r paste0(dim(proj), collapse = " x ")` matrix for the projected data to calculate the LSI with.
+
+### Doublets
+
+Here we do the same as for the integrated set, but drop the singlet requirement.
+
+```{r}
+# Make cell filter
+col_sum <- Matrix::colSums(mat)
+keep_cells <- col_sum >= feats_per_cell
+
+# Make feature filter
+row_mean    <- Matrix::rowMeans(mat[, keep_cells])
+keep_feat   <- row_mean >= props_per_feat & !on_promoter
+
+# Apply filter
+doublets <- orig[keep_feat, keep_cells]
+```
+
+We retain a `r paste0(dim(doublets), collapse = " x ")` matrix for the doublet data to calculate the LSI with.
+
+## Latent Semantic Indexing
+
+We call an SVD on a centered and scaled TF-IDF matrix, from which we calculate a PCA.
+
+### Integrated
+
+```{r}
+mat <- assay(merged, "counts")
+
+# Do TF-IDF
+tfidf <- tf_idf(mat)
+
+# Do SVD
+center <- Matrix::rowMeans(tfidf)
+scale  <- sparseMatrixStats::rowSds(tfidf)
+svd    <- irlba(
+  t(tfidf), 
+  nu = 100, nv = 100, work = 200,
+  center = center, scale = scale
+)
+
+# SVD to PCA
+D <- diag(svd$d)
+pca <- t(D %*% t(svd$u))
+
+# Calculate variance explained
+varexp <- (svd$d^2) / sum(svd$d^2)
+
+# Store LSI
+attr(pca, "varexp") <- varexp
+dimnames(pca) <- list(
+  colnames(mat), 
+  paste0("LSI", seq_len(ncol(pca)))
+)
+reducedDim(all_features, "LSI-integrated") <- pca
+```
+
+### Projected
+
+Here we first calculate the TF-IDF for the timeseries data. For the KO data, we calculate the TF-IDF, but we don't use the IDF term computed from the KO data. Instead, we use the IDF term from the timeseries data on the KO data, to keep this term consistent between both datasets.
+
+```{r}
+is_timeseries <- !(proj$batch == "KOs")
+mat <- assay(proj, "counts")
+
+# Do TF-iDF
+tfidf <- tf_idf(mat[, is_timeseries])
+idf   <- attr(tfidf, "idf")
+
+# Use timeseries IDF term
+proj_tfidf <- tf_idf(mat[, !is_timeseries], idf = idf)
+```
+
+Next, we calculate the SVD and PCA for the timeseries data.
+
+```{r}
+# Do SVD
+center <- Matrix::rowMeans(tfidf)
+scale  <- sparseMatrixStats::rowSds(tfidf)
+svd    <- irlba(
+  t(tfidf), 
+  nu = 100, nv = 100, work = 200,
+  center = center, scale = scale
+)
+
+# SVD to PCA
+D <- diag(svd$d)
+pca <- t(D %*% t(svd$u))
+
+# Calculate variance explained
+varexp <- (svd$d^2) / sum(svd$d^2)
+```
+
+For the KO data, we use the centering and scaling paramters of the timeseries data. We can then use the cross-product of the projected TF-IDF with the $V$ part of the SVD calculated on the timeseries data. This will project the KO data onto the PCA axes of the timeseries.
+
+```{r}
+# Center/scale projected TF-IDF with previous means/sds
+proj_tfidf <- as.matrix(proj_tfidf)
+proj_tfidf <- sweep(proj_tfidf, 1, center, FUN = "-")
+proj_tfidf <- sweep(proj_tfidf, 1, scale,  FUN = "/")
+
+# Project KO data on top of timeseries data
+proj_pca <- crossprod(svd$v, proj_tfidf)
+proj_pca <- t(proj_pca)
+
+# Combine projected with original pca
+# Note that this only has the right order because we know that the KO data
+# comes after the timeseries data. Be more careful if projecting cells that
+# occur in a different order.
+pca <- rbind(pca, proj_pca)
+
+# Store LSI
+attr(pca, "varexp") <- varexp
+dimnames(pca) <- list(
+  colnames(mat), 
+  paste0("LSI", seq_len(ncol(pca)))
+)
+reducedDim(all_features, "LSI-projected") <- pca
+```
+
+### Doublets
+
+We following the regular LSI procedure of doing TF-IDF followed by SVD, converted to PCA.
+
+```{r}
+mat <- assay(doublets, "counts")
+
+# Do TF-IDF
+tfidf <- tf_idf(mat)
+
+# Do SVD
+center <- Matrix::rowMeans(tfidf)
+scale  <- sparseMatrixStats::rowSds(tfidf)
+svd    <- irlba(
+  t(tfidf), 
+  nu = 100, nv = 100, work = 200,
+  center = center, scale = scale
+)
+
+# SVD to PCA
+D <- diag(svd$d)
+pca <- t(D %*% t(svd$u))
+
+# Calculate variance explained
+varexp <- (svd$d^2) / sum(svd$d^2)
+
+# Store LSI
+attr(pca, "varexp") <- varexp
+dimnames(pca) <- list(
+  colnames(mat), 
+  paste0("LSI", seq_len(ncol(pca)))
+)
+reducedDim(doublets, "LSI-doublets") <- pca
+```
+
+## Plots {.tabset}
+
+### Integrated
+
+```{r}
+pca <- reducedDim(all_features, "LSI-integrated")
+```
+
+
+#### PCA
+
+```{r}
+plot_pca(pca, all_features$sample) &
+  scale_colour_manual(values = sample_palette)
+```
+
+#### Library Size correlation
+
+```{r}
+df <- data.frame(
+  x = colSums(assay(merged)),
+  pc1 = pca[, 1],
+  sample = merged$sample
+)
+
+fit <- locfit::locfit(pc1 ~ lp(x, deg = 2), data = df)
+
+ggplot(df, aes(x, pc1)) +
+  geom_point(aes(colour = sample)) +
+  geom_function(
+    fun = ~ predict(fit, .x)
+  ) +
+  scale_colour_manual(
+    values = sample_palette,
+    guide  = guide_legend(override.aes = list(size = 2, alpha = 1))
+  ) +
+  labs(x = "# Covered Peaks", y = "PC1")
+```
+
+```{r}
+cors <- as.vector(cor(df$x, pca, method = "spearman"))
+cors <- data.frame(
+  pc  = seq_len(ncol(pca)),
+  cor = cors
+)
+
+ggplot(cors, aes(pc, cor)) +
+  geom_pointpath() +
+  labs(x = "PC #", y = "Spearman's Rho")
+```
+
+#### GC content bias
+
+```{r}
+df <- data.frame(
+  x = merged$QC_stats$GC_content,
+  pc2 = pca[, 2],
+  sample = merged$sample
+)
+
+fit <- locfit::locfit(pc2 ~ lp(x, deg = 2), data = df)
+
+ggplot(df, aes(x, pc2)) +
+  geom_point(aes(colour = sample)) +
+  geom_function(
+    fun = ~ predict(fit, .x)
+  ) +
+  scale_colour_manual(
+    values = sample_palette,
+    guide  = guide_legend(override.aes = list(size = 2, alpha = 1))
+  ) +
+  labs(x = "GC Fraction", y = "PC2")
+```
+
+```{r}
+cors <- as.vector(cor(merged$QC_stats$GC_content, pca, method = "spearman"))
+cors <- data.frame(
+  pc  = seq_len(ncol(pca)),
+  cor = cors
+)
+
+ggplot(cors, aes(pc, cor)) +
+  geom_pointpath() +
+  labs(x = "PC #", y = "Spearman's Rho")
+```
+
+### Projected
+
+```{r}
+pca <- reducedDim(all_features, "LSI-projected")
+```
+
+
+#### PCA {.unlisted .unnumbered}
+
+```{r}
+plot_pca(pca, all_features$sample) &
+  scale_colour_manual(values = sample_palette)
+```
+
+#### Library Size correlation {.unlisted .unnumbered}
+
+```{r}
+df <- data.frame(
+  x = colSums(assay(merged)),
+  pc1 = pca[, 1],
+  sample = merged$sample
+)
+
+fit <- locfit::locfit(pc1 ~ lp(x, deg = 2), data = df)
+
+ggplot(df, aes(x, pc1)) +
+  geom_point(aes(colour = sample)) +
+  geom_function(
+    fun = ~ predict(fit, .x)
+  ) +
+  scale_colour_manual(
+    values = sample_palette,
+    guide  = guide_legend(override.aes = list(size = 2, alpha = 1))
+  ) +
+  labs(x = "# Covered Peaks", y = "PC1")
+```
+
+```{r}
+cors <- as.vector(cor(df$x, pca, method = "spearman"))
+cors <- data.frame(
+  pc  = seq_len(ncol(pca)),
+  cor = cors
+)
+
+ggplot(cors, aes(pc, cor)) +
+  geom_pointpath() +
+  labs(x = "PC #", y = "Spearman's Rho")
+```
+
+#### GC content bias {.unlisted .unnumbered}
+
+```{r}
+df <- data.frame(
+  x = merged$QC_stats$GC_content,
+  pc2 = pca[, 2],
+  sample = merged$sample
+)
+
+fit <- locfit::locfit(pc2 ~ lp(x, deg = 2), data = df)
+
+ggplot(df, aes(x, pc2)) +
+  geom_point(aes(colour = sample)) +
+  geom_function(
+    fun = ~ predict(fit, .x)
+  ) +
+  scale_colour_manual(
+    values = sample_palette,
+    guide  = guide_legend(override.aes = list(size = 2, alpha = 1))
+  ) +
+  labs(x = "GC Fraction", y = "PC2")
+```
+
+```{r}
+cors <- as.vector(cor(merged$QC_stats$GC_content, pca, method = "spearman"))
+cors <- data.frame(
+  pc  = seq_len(ncol(pca)),
+  cor = cors
+)
+
+ggplot(cors, aes(pc, cor)) +
+  geom_pointpath() +
+  labs(x = "PC #", y = "Spearman's Rho")
+```
+
+### Doublets
+
+While PCA was calculated on all cells, we'll only show the doublets here.
+
+```{r}
+is_doublet <- doublets$doublets$class == "doublet"
+
+pca <- reducedDim(doublets, "LSI-doublets")[is_doublet, ]
+attr(pca, "varexp") <- attr(reducedDim(doublets, "LSI-doublets"), "varexp")
+
+meta <- colData(doublets)[is_doublet, ]
+```
+
+#### PCA {.unlisted .unnumbered}
+
+```{r}
+plot_pca(pca, meta$sample) &
+  scale_colour_manual(values = sample_palette)
+```
+
+#### Library Size correlation {.unlisted .unnumbered}
+
+```{r}
+df <- data.frame(
+  x = colSums(assay(doublets)[, is_doublet]),
+  pc1 = pca[, 1],
+  sample = meta$sample
+)
+
+fit <- locfit::locfit(pc1 ~ lp(x, deg = 2), data = df)
+
+ggplot(df, aes(x, pc1)) +
+  geom_point(aes(colour = sample)) +
+  geom_function(
+    fun = ~ predict(fit, .x)
+  ) +
+  scale_colour_manual(
+    values = sample_palette,
+    guide  = guide_legend(override.aes = list(size = 2, alpha = 1))
+  ) +
+  labs(x = "# Covered Peaks", y = "PC1")
+```
+
+```{r}
+cors <- as.vector(cor(df$x, pca, method = "spearman"))
+cors <- data.frame(
+  pc  = seq_len(ncol(pca)),
+  cor = cors
+)
+
+ggplot(cors, aes(pc, cor)) +
+  geom_pointpath() +
+  labs(x = "PC #", y = "Spearman's Rho")
+```
+
+#### GC content bias {.unlisted .unnumbered}
+
+```{r}
+df <- data.frame(
+  x = meta$QC_stats$GC_content,
+  pc2 = pca[, 2],
+  sample = meta$sample
+)
+
+fit <- locfit::locfit(pc2 ~ lp(x, deg = 2), data = df)
+
+ggplot(df, aes(x, pc2)) +
+  geom_point(aes(colour = sample)) +
+  geom_function(
+    fun = ~ predict(fit, .x)
+  ) +
+  scale_colour_manual(
+    values = sample_palette,
+    guide  = guide_legend(override.aes = list(size = 2, alpha = 1))
+  ) +
+  labs(x = "GC Fraction", y = "PC2")
+```
+
+```{r}
+cors <- as.vector(cor(meta$QC_stats$GC_content, pca, method = "spearman"))
+cors <- data.frame(
+  pc  = seq_len(ncol(pca)),
+  cor = cors
+)
+
+ggplot(cors, aes(pc, cor)) +
+  geom_pointpath() +
+  labs(x = "PC #", y = "Spearman's Rho")
+```
+
+## Batch correction
+
+We follow a similar strategy for all the 3 approaches: we use `batchelor::reducedMNN()` on the PCA data, and set the merge order from largest to smallest batch.
+
+### Integrated
+
+```{r}
+pca <- reducedDim(all_features, "LSI-integrated")
+
+batches <- factor(
+  all_features$batch, 
+  levels = c("pilot", "timecourse", "timecourse2", "KOs")
+)
+
+# Merge from largest batch to smallest batch
+merge_order <- order(table(batches), decreasing = TRUE)
+
+corrected <- reducedMNN(pca, batch = batches, merge.order = merge_order)
+
+reducedDim(all_features, "LSI-integrated-corrected") <- corrected$corrected
+```
+
+### Projected
+
+```{r}
+pca <- reducedDim(all_features, "LSI-projected")
+
+batches <- factor(
+  all_features$batch, 
+  levels = c("pilot", "timecourse", "timecourse2", "KOs")
+)
+
+# Merge from largest batch to smallest batch
+merge_order <- order(table(batches), decreasing = TRUE)
+
+corrected <- reducedMNN(pca, batch = batches, merge.order = merge_order)
+
+reducedDim(all_features, "LSI-projected-corrected") <- corrected$corrected
+```
+
+### Doublets
+
+```{r}
+pca <- reducedDim(doublets, "LSI-doublets")
+
+batches <- factor(
+  doublets$batch, 
+  levels = c("pilot", "timecourse", "timecourse2", "KOs")
+)
+
+# Merge from largest batch to smallest batch
+merge_order <- order(table(batches), decreasing = TRUE)
+
+corrected <- reducedMNN(pca, batch = batches, merge.order = merge_order)
+
+reducedDim(doublets, "LSI-doublets-corrected") <- corrected$corrected
+```
+
+## Save output
+
+```{r}
+saveRDS(all_features, here("rds", "06_LSI_experiment.rds"))
+saveRDS(doublets,     here("rds", "06_LSI_doublets.rds"))
+```
+
+## References
+
+<div id="refs"></div>
+
+## Session Info
+
+```{r session_info, include=TRUE, echo=FALSE, results = "asis"}
+pkgs <- loadedNamespaces()
+libTvdB::format_sessioninfo_html(pkgs)
+```

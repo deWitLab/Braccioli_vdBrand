@@ -1,0 +1,393 @@
+---
+title: "Differential Accessibility"
+author: 
+  - name: "Teun van den Brand"
+    email: "t.vd.brand@nki.nl"
+    affiliation: "Netherlands Cancer Institute"
+date: '`r format(Sys.time(), "%d/%m/%Y")`'
+output: 
+  html_document:
+    theme: united
+    highlight: pygments
+    fig_caption: yes
+    code_folding: hide
+    df_print: kable
+    toc: true
+    toc_depth: 4
+    toc_float:
+      collapsed: false
+bibliography: /DATA/users/t.vd.brand/bibliography/articles.bibtex
+knit: |
+  # Redirect output to HTML folder
+  (function(inputFile, encoding) {
+    outputFile <- gsub("Rmd$", "html", basename(inputFile))
+    rmarkdown::render(
+      input = inputFile,
+      encoding = encoding,
+      output_file = here::here("html", outputFile)
+    )
+  })
+---
+
+## Setup {.tabset}
+
+<!-- little HTML script to do indentation of the table of contents -->
+<script>
+    $(document).ready(function() {
+      $items = $('div#TOC li');
+      $items.each(function(idx) {
+        num_ul = $(this).parentsUntil('#TOC').length;
+        $(this).css({'text-indent': num_ul * 10, 'padding-left': 0});
+      });
+
+    });
+</script>
+
+```{css, echo = FALSE}
+div.sourceCode {
+  overflow-x: hidden;
+}
+```
+
+### Load packages
+
+```{r stfu, include = FALSE}
+# No, I do *not* want your start-up messages, thank you very much
+library <- function(...) {
+  suppressPackageStartupMessages(base::library(...))
+}
+```
+
+
+```{r load_packages}
+library(SingleCellExperiment)
+library(ggplot2)
+library(scales)
+library(GenomicRanges)
+library(eulerr)
+library(ggh4x)
+library(data.table, exclude = "shift")
+library(here)
+library(colorspace)
+```
+
+### Load data
+
+```{r load_data}
+exp_file   <- here("rds", "06_LSI_experiment.rds")
+stats_file <- here("rds", "06_peak_statistics.rds")
+
+exp   <- readRDS(exp_file)
+stats <- readRDS(stats_file)
+```
+
+### Setup Aesthetics
+
+```{r setup_aes}
+mycolour <- "#000000FF" # Opaque Black
+
+theme_set(theme_gray())
+theme_update(text = element_text(colour = mycolour),
+             line = element_line(colour = mycolour),
+             aspect.ratio = 1,
+             axis.line  = element_line(colour = mycolour),
+             axis.ticks = element_line(colour = mycolour),
+             axis.text  = element_text(colour = mycolour),
+             legend.key = element_blank(),
+             legend.background = element_rect(colour = NA, fill = NA),
+             panel.background = element_blank(),
+             panel.grid.major = element_line(colour = "grey95"),
+             panel.grid.minor = element_blank(),
+             plot.background  = element_blank(),
+             strip.background = element_blank(),
+             strip.text = element_text(colour = mycolour))
+CYRUP <- c("#fed500", "#009bef", "#ff5c49", "#949494", "#D8D8D8")
+div_colours <- c("#0065b2", "#2399de", "#67cdfe", "#f5f5f5", "#fcb09d", 
+                 "#ed6855", "#be2a21")
+
+rm(mycolour)
+```
+
+## Aim
+
+Visualise the results of differential accessbility tests between clusters.
+
+## Context
+
+```{r}
+umap <- reducedDim(exp, "UMAP")
+umap <- data.frame(
+  x = umap[, 1],
+  y = umap[, 2],
+  clust = exp$clusters$cluster
+)
+clust_colours <- metadata(exp$clusters)$colours
+my_legend     <- guide_legend(override.aes = list(size = 2, alpha = 1))
+
+ggplot(umap, aes(x, y, colour = clust)) +
+  geom_point(size = 0.5) +
+  scale_colour_manual(
+    values = clust_colours, 
+    name   = "Cluster",
+    guide  = my_legend
+  ) +
+  scale_x_continuous(name = "UMAP 1", breaks = NULL) +
+  scale_y_continuous(name = "UMAP 2", breaks = NULL)
+```
+
+## Likelihood Ratio Tests
+
+This is a very broad tests, simply testing whether the model's likelihood improved upon including clusters as a factor level.
+
+```{r}
+df <- data.frame(
+  x = stats$intercept,
+  pval = stats$lr_pval, "fdr",
+  stat = stats$lr_stat
+)
+
+ggplot(df, aes(stat, p.adjust(pval, "fdr"))) +
+  geom_hline(yintercept = 0.01, linetype = "dotted") +
+  geom_point() +
+  scale_y_continuous(
+    trans  = c("log10", "reverse"),
+    breaks = 10^c(-150, -100, -50, 0),
+    labels = label_math(format = log10),
+    name   = "FDR P-value"
+  ) +
+  scale_x_continuous(
+    name = expression(-2 %.% Delta * "(Log Likelihood)")
+  )
+```
+
+```{r}
+ggplot(df, aes(pval, fill = p.adjust(pval, "fdr") < 0.01)) +
+  geom_histogram(breaks = seq(0, 1, by = 0.01)) +
+  scale_y_continuous(
+    name = "# Peaks (x 1000)",
+    labels = number_format(scale = 1e-3),
+    expand = c(0, 0, 0.1, 0)
+  ) +
+  scale_fill_manual(
+    name = "FDR < 0.01",
+    values = c("#999999", "#e41a1c"),
+    labels = c("No", "Yes")
+  ) +
+  scale_x_continuous(name = "Raw P-value")
+```
+
+## Cluster specific
+
+```{r}
+# Thresholds
+effect_thres <- log(1.5)
+fdr_thres    <- 0.05
+
+# Extract columns
+clusters <- sort(unique(exp$clusters$cluster))
+pvalue_columns <- paste0("cluster_", clusters, "_pvalue")
+effect_columns <- paste0("cluster_", clusters, "_estimate")
+
+pvalues <- stats[, pvalue_columns]
+effects <- stats[, effect_columns]
+fdrs    <- lapply(pvalues, p.adjust, method = "fdr")
+```
+
+### Counts
+
+```{r}
+peak_counts <- Map(
+  function(effect, fdr) {
+    signif <- fdr < fdr_thres & abs(effect) > effect_thres
+    sgn    <- sign(effect)
+    as.data.frame(table(signif, sgn))
+  },
+  effect = effects,
+  fdr    = fdrs
+)
+peak_counts <- setNames(peak_counts, clusters)
+peak_counts <- rbindlist(peak_counts, idcol = "clust")
+peak_counts <- peak_counts[signif == TRUE,]
+peak_counts$sgn <- as.numeric(as.character(peak_counts$sgn))
+
+ggplot(peak_counts, aes(sgn * Freq, y = clust, fill = clust)) +
+  geom_col(width = 2/(1 + sqrt(5)),
+           aes(colour = after_scale(darken(fill, 0.3)))) +
+  geom_text(
+    aes(
+      label = number(Freq, big.mark = ","),
+      hjust = ifelse(sgn == 1, -0.2, 1.2)
+    )
+  ) +
+  annotate(
+    "text", x = c(-Inf, Inf), y = 9,
+    label = c("Loss of accessibility", "Gain of accessibility"),
+    hjust = c(-0.1, 1.1),
+    vjust = 1.2
+  ) +
+  scale_x_continuous(
+    labels = ~ abs(.x),
+    name   = "# Significant Peaks",
+    expand = c(0.1, 0),
+    breaks = breaks_width(1000)
+  ) +
+  scale_fill_manual(
+    values = clust_colours,
+    guide = "none"
+  ) +
+  scale_y_discrete(
+    limits = rev(clusters),
+    name   = "Cluster"
+  ) +
+  coord_axes_inside() +
+  theme(aspect.ratio = 2/(1 + sqrt(5)))
+```
+
+### Volcano plots {.tabset}
+
+```{r}
+xlim <- c(-3, 3)
+ylim <- c(1, 1e-30)
+volcanos <- Map(
+  function(effect, fdr) {
+    oob <- between(effect, xlim[1], xlim[2])
+    oob <- oob & between(fdr, ylim[2], ylim[1])
+    data.frame(
+      logodds = effect,
+      fdr     = fdr,
+      oob     = oob,
+      cat     = ifelse(
+        fdr > 0.05 | abs(effect) < log(1.5), "n.s.",
+        ifelse(effect > 0, "up", "down")
+      )
+    )
+  },
+  effect = effects,
+  fdr    = fdrs
+)
+volcanos <- setNames(volcanos, paste0("Cluster ", clusters))
+
+template <- ggplot(mapping = aes(logodds, fdr, colour = cat)) +
+  geom_point(aes(shape = oob), size = 0.5) +
+  geom_text(
+    stat = "summary", fun = length,
+    aes(x = stage(match(cat, unique(cat)), after_stat = -Inf), 
+        y = 1, group = cat, vjust = after_stat(group * 1.5),
+        label = stage(cat, after_stat = 
+                        paste0(label, ": ", number(y, big.mark = ",")))),
+    show.legend = FALSE, hjust = 0
+  ) +
+  scale_x_continuous(
+    limits = xlim,
+    oob    = oob_squish,
+    breaks = breaks_width(1),
+    name   = "Log Odds Ratio",
+    expand = c(0, 0)
+  ) +
+  scale_y_continuous(
+    trans  = c("log10", "reverse"),
+    limits = ylim,
+    breaks = 10^seq(0, -30, by = -5),
+    labels = math_format(format = log10),
+    name   = "FDR P-value",
+    oob    = oob_squish,
+    expand = c(0.01, 0, 0.1, 0)
+  ) +
+  scale_shape_manual(
+    values = c(16, 4),
+    guide  = "none"
+  ) +
+  scale_colour_manual(
+    values = c("dodgerblue", "#999999", "limegreen"),
+    guide  = "none"
+  ) +
+  coord_axes_inside()
+
+volc_plots <- lapply(setNames(nm = names(volcanos)), function(i) {
+  (template + ggtitle(i)) %+% volcanos[[i]]
+})
+```
+
+```{r, results = 'asis', message = FALSE, warning=FALSE}
+for (i in names(volcanos)) {
+  cat(paste0("\n\n#### ", i, "\n"))
+  print(volc_plots[[i]])
+}
+```
+
+### UMAP
+
+```{r}
+template <- matrix(0, nrow = nrow(exp), ncol = 2, 
+                   dimnames = list(NULL, c("up", "down")))
+
+peaksets <- Map(
+  function(effect, fdr) {
+    index <- stats$ranges$index
+    cat <- ifelse(
+      fdr > 0.05 | abs(effect) < log(1.5), "n.s.",
+      ifelse(effect > 0, "up", "down")
+    )
+    mat <- template
+    mat[index[cat == "down"], "down"] <- 1
+    mat[index[cat == "up"],   "up"]   <- 1
+    mat
+  },
+  effect = effects,
+  fdr    = fdrs
+)
+peaksets <- do.call(cbind, peaksets)
+colnames(peaksets) <- paste0(rep(clusters, each = 2), "_",
+                             rep(c("up", "down"), length(clusters)))
+
+mat <- assay(exp, "counts")
+col_means <- colMeans(mat)
+
+counts <- Matrix::crossprod(peaksets, mat)
+counts <- sweep(counts, 1, colSums(peaksets), FUN = "/")
+counts <- t(counts)
+
+obsexp <- sweep(counts, 1, col_means, FUN = "/")
+
+df <- cbind.data.frame(umap, as.matrix(log2(obsexp)))
+df <- tidyr::pivot_longer(df, c(-x, -y, -clust))
+setDT(df)
+df[, c("peakset", "direction") := tstrsplit(name, "_")]
+
+peaksets <- split(df, df$peakset)
+
+template <- ggplot(peaksets[[7]], mapping = aes(x, y, colour = value)) +
+  geom_point(size = 0.5) +
+  scale_colour_gradientn(
+    name = expression("Log"[2]*"(Obs/Exp)"),
+    colors   = div_colours,
+    limits = c(-2, 2), oob = oob_squish
+  ) +
+  facet_wrap(~ direction) +
+  scale_x_continuous(name = "UMAP 1", breaks = NULL) +
+  scale_y_continuous(name = "UMAP 2", breaks = NULL) +
+  coord_equal() +
+  theme(aspect.ratio = NULL,
+        legend.position = "bottom")
+
+umap_plots <- lapply(setNames(nm = names(peaksets)), function(i) {
+  (template + ggtitle(paste0("Cluster ", i))) %+% peaksets[[i]]
+})
+```
+
+```{r, results = 'asis', message = FALSE, warning=FALSE}
+for (i in names(umap_plots)) {
+  cat(paste0("\n\n#### ", i, "\n"))
+  print(umap_plots[[i]])
+}
+```
+## References
+
+<div id="refs"></div>
+
+## Session Info
+
+```{r session_info, include=TRUE, echo=FALSE, results = "asis"}
+pkgs <- loadedNamespaces()
+libTvdB::format_sessioninfo_html(pkgs)
+```
